@@ -22,33 +22,32 @@ import CADH.DataDefs
 --   telemetry stream with fixed or varying packet types
 --   decoding array of fixed size structures
 
-data PrimData
-  = Uint8   Word8
-  | Uint16  Word16
-  | Uint32  Word32
-  | Uint64  Word64
-  | Sint8   Int8
-  | Sint16  Int16
-  | Sint32  Int32
-  | Sint64  Int64
-  | Chr     Char
-  | Flt     Float 
-  | Dbl     Double 
-  | Enum    Sym
-  -- string, array
+data DataTree a b
+  = DataLeaf b
+  | DataTree a [DataTree a b]
 
-data DataTree a
-  = DataLeaf a
-  | DataTree a [DataTree a]
 
-type Offset = Int
-type Size = Int
+data IndexEntry = Field Sym Offset Size DataDef
 
-data Field = Field Offset Size DataDef
+type Index = DataTree IndexEntry ()
+type Struct = DataTree IndexEntry PrimData
 
-type Index = DataTree Field
 
-type Struct = Map Sym PrimData
+decodeDef :: DataDef -> Get Struct
+decodeDef def = decodeDef' def 0
 
-tlmStuct = M.fromList [("Apid", 1), ("Version", 0), ("SecHeaderFlag", 1), ("Type", 1)]
+decodeDef def offset =
+  case def of
+    PackedDef    sym         defs -> decodePacked defs offset
+    PackedBitDef sym         bitDefs -> decodeBits bitDefs offset
+    OneOfDef     sym sym     mapping -> decodeOneOf mapping offset
+    AllOfDef     sym         defs -> decodeAllOf defs offset
+    ArrDef       sym arrSize def -> decodeArr arrSize def offset
+    ValueDef     sym         val -> decodeVal offset val
 
+decodePacked defs offset
+decodeBits bitDefs offset
+decodeOneOf mapping offset
+decodeAllOf defs offset
+decodeArr arrSize def offset
+decodeVal offset val

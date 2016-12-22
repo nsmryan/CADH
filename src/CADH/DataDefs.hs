@@ -40,6 +40,20 @@ data PrimTy
   | TyInt32  Endianness
   | TyInt64  Endianness
 
+data PrimData
+  = Uint8   Word8
+  | Uint16  Word16
+  | Uint32  Word32
+  | Uint64  Word64
+  | Sint8   Int8
+  | Sint16  Int16
+  | Sint32  Int32
+  | Sint64  Int64
+  | Chr     Char
+  | Flouble 
+  | Enum    Int Sym
+  -- string, array
+
 data BasicTy
   = TyPrim   PrimTy
   | TyChar
@@ -47,23 +61,31 @@ data BasicTy
   | TyFlt    Endianness
   | TyEnum   EnumTy PrimTy
   -- | fixed size byte buffer. unnamed array elements
+
   
 data ArrSize = SizeFixed Int | SizeLookup Sym
-
-type DataSet = M.Map BasicTy DataDef
-
 
 type NumBits = Int
 
 data BitData = BitData Sym NumBits Endianness BasicTy
 
+data Subcom = M.Map Int DataDef
+
 data DataDef
   = PackedDef        Sym         [DataDef]  -- product
   | PackedBitDef     Sym         [BitData]  -- product-like
-  | OneOfDef         Sym Sym      DataSet   -- offer to packet
+  | OneOfDef         Sym Sym      Subcom    -- offer to packet
   | AllOfDef         Sym         [DataDef]  -- request from packet
   | ArrDef           Sym ArrSize  DataDef   -- exponent, map from int/enum to datadef
   | ValueDef         Sym          BasicTy   -- base type
+
+
+type Offset = Int
+
+type Size = Int
+
+data Structure = Leaf PrimData 
+               | Node DataDef Offset Size
 
 {- Example Definitions -}
 ccsdsVersion       = BitData "Version"   3  BigEndian (TyPrim TyUint8)

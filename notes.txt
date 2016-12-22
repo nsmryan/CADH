@@ -1,0 +1,92 @@
+
+
+Stages:
+  read a single byte from a file using binary
+  read a single byte from a file using binary+pipes
+  read a single primitive type
+  read a record of primitive types
+  read a series of records of primitive type
+
+
+Features:
+  take config (probably json) describing datatype
+    consider files for each type with a way to distinguish them
+    ideally these get placed in a sum type
+
+  write/read file or socket depending on config file
+    ideally can choose tcp or udp
+
+  output either binary blocks (packets for examples) or csv decoding
+  input should also allow csv to allow streaming its own output
+
+
+Questions:
+  is there a fundemental distinction between a static type for manipulating
+    data internally like Record f '[], and parsing/decoding from a
+    type that describes possible structures
+    where is the commonality and where are the difference, and should they
+    be combined or left separate
+
+  need to add functions/application specific code and have a mainWith
+    potentially in case there is complexity to decoding packets,
+    like with SPOCUtils
+
+  udp input bring up question of receiving full block verse a stream-
+    start out with stream processing through
+
+
+Data Types:
+
+products:
+  fixed vs var
+  sequence type
+  parallel product type- session type analogy
+
+sums:
+  pad vs pack
+
+exponents:
+  map from indices or enum to data
+
+primitives:
+  (u,s) X (8,16,32,64)
+  float, double
+  bitmaps
+
+
+{ "stream" :
+  { packets : ["vn200", "locata", "smartTlm", "smartSystemState", "smartIO"]
+  , "source" : { "file" : "Logged_Data" }
+  , "destination" :
+    { "tcpip" : { "port" = 8001
+                , ip = "192.168.1.100"
+                }
+    }
+  , "integrity-checking" = true
+  , "limit-checking" = true
+  , "summary" = true
+  }
+}
+
+{ "packet" : { "vn200" : { "description" = "VN-200 Telemetry Packet"
+                          , "definition" = "VNTelemetry"
+                          }
+}
+
+{ "packet" : { "locata" : { "description" = "Locata Telemetry Packet"
+                          , "definition" = "LocataTelemetry"
+                          }
+             }
+}
+
+{ "type" : { "name" = "VNTelemetry"
+           , "definition" = ["vn200Header", "vn200Body", "vn200Checksum"]
+           }
+}
+
+{ "type" : { "name" = "LocataTelemetry"
+           , "definition" = ["locataHeader", "locataBody", "locataCRC32"]
+           }
+}
+            
+

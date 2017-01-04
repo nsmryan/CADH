@@ -1,12 +1,17 @@
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE UndecidableInstances #-}
 module CADH.DataDefs
 (
   Name,
   Endianness(..),
-  PrimTy(..),
-  PrimData(..),
-  BasicTy(..),
-  BasicData(..),
-  ArrSize(..),
+  Prim(..),
+  PrimTy,
+  PrimData,
+  BasicTlm(..),
+  BasicTy,
+  BasicData,
+  TlmTy(..),
   -- DataSet(..),
   Container(..),
   Tlm(..),
@@ -14,6 +19,7 @@ module CADH.DataDefs
   TlmData,
   TlmDecoder,
   TlmDecoded,
+  DecodeSection(..),
   Name,
   Size,
   Offset,
@@ -44,10 +50,14 @@ module CADH.DataDefs
   sizeOfBasic
 ) where
 
+import Control.Monad.Identity
+
 import qualified Data.Map as M
 import Data.Word
 import Data.Int
 import qualified Data.Bimap as Bi
+import Data.ByteString as B
+import Data.Proxy
 
 
 -- case studies:
@@ -63,54 +73,85 @@ type Size    = Int
 type Offset  = Int
 type NumBits = Int
 
-data Endianness = BigEndian
-                | LittleEndian
-                deriving (Show, Eq, Enum)
+data ChecksumType
+  = ChecksumOverflow
+  | ChecksumUnderflow
+  | ChecksumXOR
+  deriving (Show, Eq)
+
+data CRCType
+  = CRCType32
+  | CRCType16
+  deriving (Show, Eq)
+
+data Semantic a
+  = SemanticTlmPoint
+  | SemanticFixedValue a
+  | SemanticChecksum ChecksumType
+  | SemanticCRC CRCType
+  deriving (Show, Eq)
+
+data Endianness
+  = BigEndian
+  | LittleEndian
+  deriving (Show, Eq, Enum)
+
+data TlmTy a
+  = TlmAny
+  | TlmRequired a
+  | TlmRequires Name a
+  | TlmExpected a
+  deriving (Show, Eq)
 
 data EnumTy = EnumTy PrimTy (Bi.Bimap Int Name)
 
-data PrimTy
-  = TyUint8  
-  | TyUint16 Endianness
-  | TyUint32 Endianness
-  | TyUint64 Endianness
-  | TyInt8   
-  | TyInt16  Endianness
-  | TyInt32  Endianness
-  | TyInt64  Endianness
-  deriving (Show, Eq)
+data Prim f
+  = Uint8 (f Word8)
+  | Uint16 Endianness  (f Word16)
+  | Uint32 Endianness  (f Word32)
+  | Uint64 Endianness  (f Word64)
+  | Sint8              (f Int8)
+  | Sint16  Endianness (f Int16)
+  | Sint32  Endianness (f Int32)
+  | Sint64  Endianness (f Int64)
 
-data BasicTy
-  = TyPrim   PrimTy
-  | TyChar
-  | TyDbl    Endianness
-  | TyFlt    Endianness
-  -- | TyEnum   EnumTy PrimTy -- does not have a definite size
-  | TyBuff   Size   PrimTy
-  | TyBits   PrimTy Offset NumBits PrimTy
-  -- | variable size buffer. unnamed array elements
-  deriving (Show, Eq)
+deriving instance
+  (Show (f Word8), Show (f Word16), Show (f Word32), Show (f Word64),
+   Show (f Int8), Show (f Int16), Show (f Int32), Show (f Int64)) =>
+  Show (Prim f)
 
-data PrimData
-  = Uint8   Word8
-  | Uint16  Word16
-  | Uint32  Word32
-  | Uint64  Word64
-  | Sint8   Int8
-  | Sint16  Int16
-  | Sint32  Int32
-  | Sint64  Int64
-  -- string, array
-  deriving (Show, Eq)
+deriving instance
+  (Eq (f Word8), Eq (f Word16), Eq (f Word32), Eq (f Word64),
+   Eq (f Int8), Eq (f Int16), Eq (f Int32), Eq (f Int64)) =>
+  Eq (Prim f)
 
-data BasicData
-  = ArrData [PrimData]
-  | Chr     Char
-  | FloatData Float 
-  | DoubleData Double 
-  | Prim PrimData
-  deriving (Show, Eq)
-  -- | Enum    Int Name PrimTy
+type PrimTy   = Prim TlmTy
+type PrimData = Prim Identity
+
+data BasicTlm f
+  = TlmPrim   (Prim f)
+  | TlmChar   (f Char)
+  | TlmDbl    Endianness (f Double)
+  | TlmFlt    Endianness (f Float)
+  | TlmArray   Size  (Prim Proxy) [Prim f]
+  | TlmBuff Size (f ByteString)
+  | TlmBits   PrimTy Offset NumBits (Prim f)
+  -- | TyEnum   EnumTy PrimTy
+
+deriving instance
+  (Show (f Word8), Show (f Word16), Show (f Word32), Show (f Word64),
+   Show (f Int8), Show (f Int16), Show (f Int32), Show (f Int64),
+   Show (f Char), Show (f Double), Show (f Float), Show (f ByteString)) =>
+  Show (BasicTlm f)
+
+deriving instance
+  (Eq (f Word8), Eq (f Word16), Eq (f Word32), Eq (f Word64),
+   Eq (f Int8), Eq (f Int16), Eq (f Int32), Eq (f Int64),
+   Eq (f Char), Eq (f Double), Eq (f Float), Eq (f ByteString)) =>
+  Eq (BasicTlm f)
+
+type BasicTy = BasicTlm TlmTy
+type BasicData = BasicTlm Identity
 
 
 data Container = Buffer Name BasicTy
@@ -128,58 +169,68 @@ data Tlm a = Tlm
 type TlmDef     = Tlm BasicTy
 type TlmData    = Tlm BasicData
 
-type TlmDecoder = M.Map Name TlmDef
--- type TlmDecoder = M.Map Name (Either TlmDef (Name, M.Map Int TlmDef))
+data DecodeSection
+  = DSDef TlmDef
+  | DSChoice Name (M.Map PrimData DecodeSection)
+
+-- FIXME this may not handle the VN-200 layout where the offsets depend on
+-- the values of previous telemetry items
+type TlmDecoder = M.Map Name DecodeSection
 type TlmDecoded = M.Map Name TlmData
-data ArrSize = SizeFixed Size | SizeLookup Name
 
-data DataSize = VariableSize | DataSize Size
-
+{- Convience functions -}
 container nam children = Section nam children
-arrTlm nam size ty = Buffer nam (TyBuff size ty)
+arrTlm nam size ty = Buffer nam (TlmArray size ty [])
 
-doubleTlm   nam endianness  = Buffer nam (TyDbl endianness)
+doubleTlm   nam endianness  = Buffer nam (TlmDbl endianness TlmAny)
 doubleTlmle nam             = doubleTlm nam LittleEndian
 doubleTlmbe nam             = doubleTlm nam BigEndian
-floatTlm    nam  endianness = Buffer nam (TyFlt endianness)
+floatTlm    nam  endianness = Buffer nam (TlmFlt endianness TlmAny)
 floatTlmle  nam             = floatTlm nam LittleEndian
 floatTlmbe  nam             = floatTlm nam BigEndian
 
-uint8Tlm nam = Buffer nam (TyPrim TyUint8)
-sint8Tlm nam = Buffer nam (TyPrim TyInt8)
+uint8Tlm nam = Buffer nam (TlmPrim (Uint8 TlmAny))
+sint8Tlm nam = Buffer nam (TlmPrim (Sint8 TlmAny))
 
-uint16Tlm endianness nam = Buffer nam (TyPrim (TyUint16 endianness))
-sint16Tlm endianness nam = Buffer nam (TyPrim (TyInt16 endianness))
-uint16Tlmle nam = Buffer nam (TyPrim (TyUint16 LittleEndian))
-sint16Tlmbe nam = Buffer nam (TyPrim (TyInt16 BigEndian))
+uint16Tlm endianness nam = Buffer nam (TlmPrim (Uint16 endianness TlmAny))
+sint16Tlm endianness nam = Buffer nam (TlmPrim (Sint16 endianness TlmAny))
+uint16Tlmle = uint16Tlm LittleEndian
+uint16Tlmbe = uint16Tlm BigEndian
+sint16Tlmle = sint16Tlm LittleEndian
+sint16Tlmbe = sint16Tlm BigEndian
 
-uint32Tlm endianness nam = Buffer nam (TyPrim (TyUint32 endianness))
-sint32Tlm endianness nam = Buffer nam (TyPrim (TyInt32 endianness))
-uint32Tlmle nam = Buffer nam (TyPrim (TyUint32 LittleEndian))
-sint32Tlmbe nam = Buffer nam (TyPrim (TyInt32 BigEndian))
+uint32Tlm endianness nam = Buffer nam (TlmPrim (Uint32 endianness TlmAny))
+sint32Tlm endianness nam = Buffer nam (TlmPrim (Sint32 endianness TlmAny))
+uint32Tlmle = uint32Tlm LittleEndian
+uint32Tlmbe = uint32Tlm BigEndian
+sint32Tlmle = sint32Tlm LittleEndian
+sint32Tlmbe = sint32Tlm BigEndian
 
-uint64Tlm endianness nam = Buffer nam (TyPrim (TyUint64 endianness))
-sint64Tlm endianness nam = Buffer nam (TyPrim (TyInt64 endianness))
-uint64Tlmle nam = Buffer nam (TyPrim (TyUint64 LittleEndian))
-sint64Tlmbe nam = Buffer nam (TyPrim (TyInt64 BigEndian))
+uint64Tlm endianness nam = Buffer nam (TlmPrim (Uint64 endianness TlmAny))
+sint64Tlm endianness nam = Buffer nam (TlmPrim (Sint64 endianness TlmAny))
+uint64Tlmle = uint64Tlm LittleEndian
+uint64Tlmbe = uint64Tlm BigEndian
+sint64Tlmle = sint64Tlm LittleEndian
+sint64Tlmbe = sint64Tlm BigEndian
 
-wrapPrim  TyUint8     n = Uint8  $ toEnum n
-wrapPrim (TyUint16 _) n = Uint16 $ toEnum n
-wrapPrim (TyUint32 _) n = Uint32 $ toEnum n
-wrapPrim (TyUint64 _) n = Uint64 $ toEnum n
-wrapPrim  TyInt8      n = Sint8  $ toEnum n
-wrapPrim (TyInt16  _) n = Sint16 $ toEnum n
-wrapPrim (TyInt32  _) n = Sint32 $ toEnum n
-wrapPrim (TyInt64  _) n = Sint64 $ toEnum n
+{- Creating and using primitive data -}
+wrapPrim (Uint8  _  ) n = Uint8    $ Identity $ toEnum n
+wrapPrim (Uint16 e _) n = Uint16 e $ Identity $ toEnum n
+wrapPrim (Uint32 e _) n = Uint32 e $ Identity $ toEnum n
+wrapPrim (Uint64 e _) n = Uint64 e $ Identity $ toEnum n
+wrapPrim (Sint8  _  ) n = Sint8    $ Identity $ toEnum n
+wrapPrim (Sint16 e _) n = Sint16 e $ Identity $ toEnum n
+wrapPrim (Sint32 e _) n = Sint32 e $ Identity $ toEnum n
+wrapPrim (Sint64 e _) n = Sint64 e $ Identity $ toEnum n
 
-unwrapPrim (Uint8  n) = fromEnum n
-unwrapPrim (Uint16 n) = fromEnum n
-unwrapPrim (Uint32 n) = fromEnum n
-unwrapPrim (Uint64 n) = fromEnum n
-unwrapPrim (Sint8  n) = fromEnum n
-unwrapPrim (Sint16 n) = fromEnum n
-unwrapPrim (Sint32 n) = fromEnum n
-unwrapPrim (Sint64 n) = fromEnum n
+unwrapPrim (Uint8    n) = fromEnum $ runIdentity n
+unwrapPrim (Uint16 _ n) = fromEnum $ runIdentity n
+unwrapPrim (Uint32 _ n) = fromEnum $ runIdentity n
+unwrapPrim (Uint64 _ n) = fromEnum $ runIdentity n
+unwrapPrim (Sint8    n) = fromEnum $ runIdentity n
+unwrapPrim (Sint16 _ n) = fromEnum $ runIdentity n
+unwrapPrim (Sint32 _ n) = fromEnum $ runIdentity n
+unwrapPrim (Sint64 _ n) = fromEnum $ runIdentity n
 
 
 --data BitData = BitData Name NumBits Endianness BasicTy
@@ -201,21 +252,21 @@ data Structure = Leaf Name Offset BasicTy
                | StructBits  Name Offset Size [BitData]
                | StructMulti Name Offset Size [Structure]
 -}
-sizeOfBasic (TyPrim  primTy) = sizeOfPrim primTy
-sizeOfBasic (TyChar) = 1
-sizeOfBasic (TyDbl _) = 8
-sizeOfBasic (TyBits ty _ _ _) = sizeOfPrim ty
-sizeOfBasic (TyFlt _) = 4
-sizeOfBasic (TyBuff siz ty) = siz * sizeOfPrim ty
+sizeOfBasic (TlmPrim  primTy)   = sizeOfPrim primTy
+sizeOfBasic (TlmChar _)         = 1
+sizeOfBasic (TlmDbl  _ _)       = 8
+sizeOfBasic (TlmBits ty _ _ _)  = sizeOfPrim ty
+sizeOfBasic (TlmFlt  _ _)       = 4
+sizeOfBasic (TlmArray siz ty _) = siz * sizeOfPrim ty
 
-sizeOfPrim  TyUint8     = 1
-sizeOfPrim (TyUint16 _) = 2
-sizeOfPrim (TyUint32 _) = 4
-sizeOfPrim (TyUint64 _) = 8
-sizeOfPrim  TyInt8      = 1
-sizeOfPrim (TyInt16  _) = 2
-sizeOfPrim (TyInt32  _) = 4
-sizeOfPrim (TyInt64  _) = 8
+sizeOfPrim (Uint8  _)   = 1
+sizeOfPrim (Uint16 _ _) = 2
+sizeOfPrim (Uint32 _ _) = 4
+sizeOfPrim (Uint64 _ _) = 8
+sizeOfPrim (Sint8  _)   = 1
+sizeOfPrim (Sint16 _ _) = 2
+sizeOfPrim (Sint32 _ _) = 4
+sizeOfPrim (Sint64 _ _) = 8
 
 {-
 sizeOfStruct (StructNode  _ _ siz _) = siz

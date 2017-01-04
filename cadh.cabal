@@ -12,12 +12,20 @@ category:            Data
 build-type:          Simple
 cabal-version:       >=1.10
 
-executable ccsds
+executable cadh-exe
   hs-source-dirs:      src
   main-is:             Main.hs
   default-language:    Haskell2010
   build-depends:       base >= 4.7 && < 5,
-                       cadh
+                       pipes-bytestring,
+                       bytestring,
+                       pipes-parse,
+                       pipes,
+                       cadh,
+                       bimap,
+                       binary,
+                       containers,
+                       mtl
 Library
   hs-source-dirs:      src
   default-language:    Haskell2010
@@ -33,6 +41,8 @@ Library
                        lens-family,
                        pretty-hex,
                        containers,
+                       binary,
+                       mtl,
                        bimap
   exposed-modules:     CADH.DataDefs
                        CADH.Structures

@@ -11,8 +11,11 @@ import Data.ByteString.Lazy as BL
 import Data.Map as M
 import Data.Binary.Get
 import Data.Bits
+import Data.Proxy
+import Data.Either
 
 import Control.Monad as M
+import Control.Monad.Identity
 import Control.Applicative
 
 import System.IO
@@ -20,6 +23,7 @@ import System.IO
 import CADH.DataDefs
 
 
+type Decom a = Either String a
 
 priHeader endianness =
   Section "PriHeader" [ firstWord endianness
@@ -28,25 +32,25 @@ priHeader endianness =
                       ]
 
 firstWord endianness =
-  let withinType = TyUint16 endianness in 
-  AllOf "PriHeaderFirstWord" [ Buffer "APID"          (TyBits withinType 0 11 (TyUint16 endianness))
-                             , Buffer "SecHeaderFlag" (TyBits withinType 11 1 TyUint8)
-                             , Buffer "PacketType"    (TyBits withinType 12 1 TyUint8)
-                             , Buffer "CCSDSVersion"  (TyBits withinType 13 3 TyUint8)
-                             ]
+  let withinType = Uint16 endianness TlmAny
+   in AllOf "PriHeaderFirstWord" [ Buffer "APID"          (TlmBits withinType 0 11 (Uint16 endianness (TlmRequired 3)))
+                                 , Buffer "SecHeaderFlag" (TlmBits withinType 11 1 (Uint8 TlmAny))
+                                 , Buffer "PacketType"    (TlmBits withinType 12 1 (Uint8 TlmAny))
+                                 , Buffer "CCSDSVersion"  (TlmBits withinType 13 3 (Uint8 TlmAny))
+                                 ]
 seqWord endianness = 
-  let withinType = TyUint16 endianness in 
-  AllOf "Seq" [ Buffer "SeqFlag"  (TyBits withinType 14  2 TyUint8)
-              , Buffer "SeqCount" (TyBits withinType  0 14 (TyUint16 endianness))
-              ]
+  let withinType = Uint16 endianness TlmAny in 
+    AllOf "Seq" [ Buffer "SeqFlag"  (TlmBits withinType 14  2 (Uint8 TlmAny))
+                , Buffer "SeqCount" (TlmBits withinType  0 14 (Uint16 endianness TlmAny))
+                ]
  
-secHeader endianness = Buffer "SecHeader" (TyBuff 10 TyUint8)
+secHeader endianness = Buffer "SecHeader" (TlmArray 10 (Uint8 Proxy) [])
 ccsdsHeader endianness = Section "CCSDSHeader" [priHeader endianness, secHeader endianness]
 
 dataBuffer =
-  container "SystemState" [arrTlm "Data" 108 TyUint8]
+  container "SystemState" [arrTlm "Data" 108 (Uint8 Proxy)]
 
-checksum = Buffer "Checksum" (TyPrim (TyUint16 LittleEndian))
+checksum = Buffer "Checksum" (TlmPrim (Uint16 LittleEndian TlmAny))
 
 sys = Section "Sys" [ ccsdsHeader LittleEndian
                     , uint8Tlm "stayInCheckResult"
@@ -87,7 +91,7 @@ decode = fst . decode' 0 M.empty
 decode' offset map tlmDef =
   case tlmDef of
     Buffer nam ty ->
-      (M.insert nam (Tlm nam offset ty) map, offset + sizeOfBasic ty)
+      (M.insert nam (DSDef $ Tlm nam offset ty) map, offset + sizeOfBasic ty)
 
     AllOf nam children -> decodeAllOf nam children map offset offset
 
@@ -113,74 +117,98 @@ decomDef def bytes = decom (decode def) bytes
 decom :: TlmDecoder -> PB.ByteString -> TlmDecoded
 decom tlmDecoder bytes =
   let insertDecommed map tlm = M.insert (tlmName tlm) (decomTlm tlm bytes) map
-  in M.foldl insertDecommed M.empty tlmDecoder
+  in case tlmDecoder of
+       DSDef tlmDecoder ->
+        M.foldl insertDecommed M.empty tlmDecoder
+
+       DSChoice nam choice ->
+         undefined
 
 decomTlm :: TlmDef -> PB.ByteString -> TlmData
 decomTlm (Tlm nam offset ty) bytes =
   let decomData = decomBasic ty $ B.drop offset bytes
   in Tlm nam offset decomData
 
-decomBasic ty bytes = runGet (getBasic ty) $ BL.fromStrict bytes
+decomBasic :: BasicTy -> PB.ByteString -> BasicData 
+decomBasic ty bytes =
+  case getBasic ty of
+    Left err -> error err
+    Right getBas -> runGet getBas (BL.fromStrict bytes)
 
+getPrim :: Prim f -> Decom (Get PrimData)
 getPrim ty = 
-  case ty of
-    TyUint8 ->
-      Uint8 <$> getWord8
+  Right $ case ty of
+    Uint8 _ ->
+      (Uint8 . Identity) <$> getWord8
 
-    TyUint16 endianness ->
-      Uint16 <$> (case endianness of
-                    BigEndian    -> getWord16be
-                    LittleEndian -> getWord16le)
+    Uint16 e _ ->
+      fmap (Uint16 e . Identity)
+           (case e of
+              BigEndian    -> getWord16be
+              LittleEndian -> getWord16le)
 
-    TyUint32 endianness ->
-      Uint32 <$> (case endianness of
-                    BigEndian    -> getWord32be
-                    LittleEndian -> getWord32le)
+    Uint32 e _ ->
+      fmap (Uint32 e . Identity)
+           (case e of
+              BigEndian    -> getWord32be
+              LittleEndian -> getWord32le)
 
-    TyUint64 endianness ->
-      Uint64 <$> (case endianness of
-                    BigEndian    -> getWord64be
-                    LittleEndian -> getWord64le)
+    Uint64 e _ ->
+      fmap (Uint64 e . Identity) 
+           (case e of
+              BigEndian    -> getWord64be
+              LittleEndian -> getWord64le)
 
-    TyInt8 ->
-      Sint8 <$> (getInt8)
+    Sint8 _ ->
+      fmap (Sint8 . Identity)
+            getInt8
 
-    TyInt16  endianness ->
-      Sint16 <$> (case endianness of
-                    BigEndian    -> getInt16be
-                    LittleEndian -> getInt16le)
+    Sint16 e _ ->
+      fmap (Sint16 e . Identity)
+           (case e of
+              BigEndian    -> getInt16be
+              LittleEndian -> getInt16le)
 
-    TyInt32  endianness ->
-      Sint32 <$> (case endianness of
-                    BigEndian    -> getInt32be
-                    LittleEndian -> getInt32le)
+    Sint32  e _ ->
+      fmap (Sint32 e . Identity)
+           (case e of
+              BigEndian    -> getInt32be
+              LittleEndian -> getInt32le)
 
-    TyInt64  endianness ->
-      Sint64 <$> (case endianness of
-                    BigEndian    -> getInt64be
-                    LittleEndian -> getInt64le)
+    Sint64 e _ ->
+      fmap (Sint64 e . Identity)
+           (case e of
+              BigEndian    -> getInt64be
+              LittleEndian -> getInt64le)
 
+getBasic :: BasicTy -> Decom (Get BasicData)
 getBasic ty = 
   case ty of
-    TyChar ->
-      (Chr . toEnum . fromEnum) <$> getWord8
+    TlmChar _ ->
+      Right $ (TlmChar . Identity . toEnum . fromEnum) <$> getWord8
 
-    TyBits tyWithin offset numBits ty ->
-      (Prim . extractBits offset numBits ty) <$> getPrim tyWithin
+    TlmBits tyWithin offset numBits ty ->
+      (fmap . fmap) (TlmPrim . extractBits offset numBits ty) 
+                    (getPrim tyWithin)
 
-    TyDbl  endianness ->
-      DoubleData <$> (case endianness of
-                        BigEndian    -> getDoublebe
-                        LittleEndian -> getDoublele)
+    TlmDbl e _ ->
+      Right $ fmap (TlmDbl e . Identity)
+                   (case e of
+                      BigEndian    -> getDoublebe
+                      LittleEndian -> getDoublele)
 
-    TyFlt  endianness ->
-      FloatData  <$> (case endianness of
-                        BigEndian    -> getFloatbe
-                        LittleEndian -> getFloatle)
+    TlmFlt e _ ->
+      Right $ fmap (TlmFlt e . Identity)
+                   (case e of
+                      BigEndian    -> getFloatbe
+                      LittleEndian -> getFloatle)
 
-    TyBuff siz ty -> ArrData <$> M.replicateM siz (getPrim ty)
+    TlmArray siz ty _ ->
+      Right $ fmap (TlmArray siz ty) 
+                   (Pre.sequence . rights . Pre.replicate siz $ (getPrim ty))
 
-    TyPrim prim -> Prim <$> getPrim prim
+    TlmPrim prim ->
+      (fmap . fmap) TlmPrim $ getPrim prim
 
 -- unwrap primitive data, shift to get bit offset, mask out higher bits, and wrap in primitive again
 extractBits offset numBits ty prim =

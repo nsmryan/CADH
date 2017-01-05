@@ -94,7 +94,7 @@ data Semantic a
 data Endianness
   = BigEndian
   | LittleEndian
-  deriving (Show, Eq, Enum)
+  deriving (Show, Eq, Enum, Ord)
 
 data TlmTy a
   = TlmAny
@@ -124,6 +124,11 @@ deriving instance
   (Eq (f Word8), Eq (f Word16), Eq (f Word32), Eq (f Word64),
    Eq (f Int8), Eq (f Int16), Eq (f Int32), Eq (f Int64)) =>
   Eq (Prim f)
+
+deriving instance
+  (Ord (f Word8), Ord (f Word16), Ord (f Word32), Ord (f Word64),
+   Ord (f Int8), Ord (f Int16), Ord (f Int32), Ord (f Int64)) =>
+  Ord (Prim f)
 
 type PrimTy   = Prim TlmTy
 type PrimData = Prim Identity
@@ -157,7 +162,7 @@ type BasicData = BasicTlm Identity
 data Container = Buffer Name BasicTy
                | Section Name [Container]
                | AllOf Name [Container]
-               -- | OneOf Name Name (M.Map Int Container)
+               | OneOf Name Name (M.Map Int Container)
                deriving (Show, Eq)
 
 data Tlm a = Tlm 
@@ -169,12 +174,16 @@ data Tlm a = Tlm
 type TlmDef     = Tlm BasicTy
 type TlmData    = Tlm BasicData
 
+-- FIXME dsseq is included for inserting sections. it ensures that
+-- the offsets in two sections are sequence, so that the second depends on the
+-- first
+-- FIXME the DSChoice mapping could be more general then Int. it could allow enums, for
+-- example
 data DecodeSection
   = DSDef TlmDef
-  | DSChoice Name (M.Map PrimData DecodeSection)
+  | DSChoice Name (M.Map Int TlmDecoder)
+  -- | DSSeq TlmDef TlmDef
 
--- FIXME this may not handle the VN-200 layout where the offsets depend on
--- the values of previous telemetry items
 type TlmDecoder = M.Map Name DecodeSection
 type TlmDecoded = M.Map Name TlmData
 

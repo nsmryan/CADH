@@ -13,6 +13,7 @@ import Data.Binary.Get
 import Data.Bits
 import Data.Proxy
 import Data.Either
+import Data.Monoid
 
 import Control.Monad as M
 import Control.Monad.Identity
@@ -88,6 +89,7 @@ sys = Section "Sys" [ ccsdsHeader LittleEndian
 decode :: Container -> TlmDecoder
 decode = fst . decode' 0 M.empty
 
+decode' :: Int -> TlmDecoder -> Container -> (TlmDecoder, Int)
 decode' offset map tlmDef =
   case tlmDef of
     Buffer nam ty ->
@@ -95,11 +97,10 @@ decode' offset map tlmDef =
 
     AllOf nam children -> decodeAllOf nam children map offset offset
 
-    -- OneOf nam key oneOfMap ->
-    --   let dat = M.findWithDefault (error "lookup couldn't find " ++ Pre.show key) key map
-    --   in case tlmPayload dat of
-    --        Prim prim -> decode' offset map $ M.findWithDefault (error "lookup couldn't find " ++ Pre.show prim) (unwrapPrim prim) oneOfMap
-    --        otherwise -> error $ "can't decode a OneOf with a non-primitive key (" ++ nam ++ ")"
+    OneOf nam key oneOfMap ->
+      let map' = fmap (decode' offset map) oneOfMap
+          elms = M.elems map'
+      in (M.insert nam (DSChoice key $ fmap fst map') map, Pre.maximum (fmap snd elms))
 
     Section nam [] -> (map, offset)
     Section nam (a:as) ->
@@ -116,24 +117,40 @@ decomDef def bytes = decom (decode def) bytes
 
 decom :: TlmDecoder -> PB.ByteString -> TlmDecoded
 decom tlmDecoder bytes =
-  let insertDecommed map tlm = M.insert (tlmName tlm) (decomTlm tlm bytes) map
-  in case tlmDecoder of
-       DSDef tlmDecoder ->
-        M.foldl insertDecommed M.empty tlmDecoder
+  let insertDecommed map tlm =
+        case tlm of
+          DSDef tlmDecoder ->
+            case decomTlm tlmDecoder bytes of
+              Left err ->
+                error err
 
-       DSChoice nam choice ->
-         undefined
+              Right tlmDecommed ->
+                M.insert (tlmName tlmDecoder) tlmDecommed map
 
-decomTlm :: TlmDef -> PB.ByteString -> TlmData
+          DSChoice nam choice ->
+            case M.lookup nam map of
+              Nothing ->
+                error $ "Key not found while decoding: " ++ nam
+
+              Just val ->
+                case tlmPayload val of
+                  TlmPrim prim ->
+                    case M.lookup (unwrapPrim prim) choice of
+                      Just tlmDecoder' ->
+                        map <> decom tlmDecoder' bytes
+                      Nothing -> error $  "Subcom data set id unknown '" ++ Pre.show val ++ "'"
+                  otherwise -> error $ "Cannot use '" ++ Pre.show val ++ "' as the key for a subcom"
+   in M.foldl insertDecommed M.empty tlmDecoder
+
+decomTlm :: TlmDef -> PB.ByteString -> Decom TlmData
 decomTlm (Tlm nam offset ty) bytes =
-  let decomData = decomBasic ty $ B.drop offset bytes
-  in Tlm nam offset decomData
+  fmap (Tlm nam offset) $ decomBasic ty $ B.drop offset bytes
 
-decomBasic :: BasicTy -> PB.ByteString -> BasicData 
+decomBasic :: BasicTy -> PB.ByteString -> Decom BasicData 
 decomBasic ty bytes =
   case getBasic ty of
-    Left err -> error err
-    Right getBas -> runGet getBas (BL.fromStrict bytes)
+    Left err -> Left err
+    Right getBas -> Right $ runGet getBas (BL.fromStrict bytes)
 
 getPrim :: Prim f -> Decom (Get PrimData)
 getPrim ty = 

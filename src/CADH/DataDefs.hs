@@ -17,11 +17,10 @@ module CADH.DataDefs
   Tlm(..),
   TlmDef,
   TlmData,
-  TlmDecoder,
   TlmDecoded,
-  DecodeSection(..),
+  printTlmPoint,
   Name,
-  Size,
+  Size(..),
   Offset,
   wrapPrim,
   unwrapPrim,
@@ -46,6 +45,7 @@ module CADH.DataDefs
   uint64Tlm,
   sint64Tlm,
   uint64Tlmle,
+  bitField,
   sint64Tlmbe,
   sizeOfBasic
 ) where
@@ -59,6 +59,8 @@ import qualified Data.Bimap as Bi
 import Data.ByteString as B
 import Data.Proxy
 
+import Hexdump
+
 
 -- case studies:
 --   locata variable length packets with blocks
@@ -69,9 +71,13 @@ import Data.Proxy
 
 {- Data Definitions -}
 type Name    = String
-type Size    = Int
 type Offset  = Int
 type NumBits = Int
+
+data Size
+  = FixedSize Int
+  | VariableSize Name Int
+  deriving (Show, Eq, Ord)
 
 data ChecksumType
   = ChecksumOverflow
@@ -89,6 +95,8 @@ data Semantic a
   | SemanticFixedValue a
   | SemanticChecksum ChecksumType
   | SemanticCRC CRCType
+  | SemanticExpected a
+  | SemanticLength Int
   deriving (Show, Eq)
 
 data Endianness
@@ -138,8 +146,8 @@ data BasicTlm f
   | TlmChar   (f Char)
   | TlmDbl    Endianness (f Double)
   | TlmFlt    Endianness (f Float)
-  | TlmArray   Size  (Prim Proxy) [Prim f]
-  | TlmBuff Size (f ByteString)
+  | TlmArray  Size  (Prim Proxy) [Prim f]
+  | TlmBuff   Size (f ByteString)
   | TlmBits   PrimTy Offset NumBits (Prim f)
   -- | TyEnum   EnumTy PrimTy
 
@@ -159,7 +167,7 @@ type BasicTy = BasicTlm TlmTy
 type BasicData = BasicTlm Identity
 
 
-data Container = Buffer Name BasicTy
+data Container = TlmPoint Name BasicTy
                | Section Name [Container]
                | AllOf Name [Container]
                | OneOf Name Name (M.Map Int Container)
@@ -171,56 +179,76 @@ data Tlm a = Tlm
   , tlmPayload :: a
   } deriving (Show, Eq)
 
+printBasic basic = 
+  case basic of
+    TlmPrim prim ->
+      show prim
+
+    TlmChar chr ->
+      show chr
+
+    TlmDbl e dbl ->
+      show dbl
+
+    TlmFlt e flt ->
+      show flt
+
+    TlmArray siz  prim prims ->
+      show prims
+
+    TlmBuff siz bytes ->
+      show $ fmap simpleHex bytes
+
+    TlmBits primContainer offset n prim ->
+      show prim
+
+printTlmPoint (Tlm name offset payload) 
+  = name ++ ": " ++ printBasic payload ++ " at offset " ++ show offset
+
 type TlmDef     = Tlm BasicTy
 type TlmData    = Tlm BasicData
 
--- FIXME dsseq is included for inserting sections. it ensures that
--- the offsets in two sections are sequence, so that the second depends on the
--- first
--- FIXME the DSChoice mapping could be more general then Int. it could allow enums, for
--- example
-data DecodeSection
-  = DSDef TlmDef
-  | DSChoice Name (M.Map Int TlmDecoder)
-  -- | DSSeq TlmDef TlmDef
-
-type TlmDecoder = M.Map Name DecodeSection
 type TlmDecoded = M.Map Name TlmData
 
 {- Convience functions -}
 container nam children = Section nam children
-arrTlm nam size ty = Buffer nam (TlmArray size ty [])
+arrTlm nam sz ty = TlmPoint nam (TlmArray (FixedSize sz) ty [])
+arrTlmVariable nam szName ty = TlmPoint nam (TlmArray (VariableSize szName 0) ty [])
 
-doubleTlm   nam endianness  = Buffer nam (TlmDbl endianness TlmAny)
+doubleTlm   nam endianness  = TlmPoint nam (TlmDbl endianness TlmAny)
 doubleTlmle nam             = doubleTlm nam LittleEndian
 doubleTlmbe nam             = doubleTlm nam BigEndian
-floatTlm    nam  endianness = Buffer nam (TlmFlt endianness TlmAny)
+floatTlm    nam  endianness = TlmPoint nam (TlmFlt endianness TlmAny)
 floatTlmle  nam             = floatTlm nam LittleEndian
 floatTlmbe  nam             = floatTlm nam BigEndian
 
-uint8Tlm nam = Buffer nam (TlmPrim (Uint8 TlmAny))
-sint8Tlm nam = Buffer nam (TlmPrim (Sint8 TlmAny))
+uint8Tlm nam = TlmPoint nam (TlmPrim (Uint8 TlmAny))
+sint8Tlm nam = TlmPoint nam (TlmPrim (Sint8 TlmAny))
 
-uint16Tlm endianness nam = Buffer nam (TlmPrim (Uint16 endianness TlmAny))
-sint16Tlm endianness nam = Buffer nam (TlmPrim (Sint16 endianness TlmAny))
+uint16Tlm endianness nam = TlmPoint nam (TlmPrim (Uint16 endianness TlmAny))
+sint16Tlm endianness nam = TlmPoint nam (TlmPrim (Sint16 endianness TlmAny))
 uint16Tlmle = uint16Tlm LittleEndian
 uint16Tlmbe = uint16Tlm BigEndian
 sint16Tlmle = sint16Tlm LittleEndian
 sint16Tlmbe = sint16Tlm BigEndian
 
-uint32Tlm endianness nam = Buffer nam (TlmPrim (Uint32 endianness TlmAny))
-sint32Tlm endianness nam = Buffer nam (TlmPrim (Sint32 endianness TlmAny))
+uint32Tlm endianness nam = TlmPoint nam (TlmPrim (Uint32 endianness TlmAny))
+sint32Tlm endianness nam = TlmPoint nam (TlmPrim (Sint32 endianness TlmAny))
 uint32Tlmle = uint32Tlm LittleEndian
 uint32Tlmbe = uint32Tlm BigEndian
 sint32Tlmle = sint32Tlm LittleEndian
 sint32Tlmbe = sint32Tlm BigEndian
 
-uint64Tlm endianness nam = Buffer nam (TlmPrim (Uint64 endianness TlmAny))
-sint64Tlm endianness nam = Buffer nam (TlmPrim (Sint64 endianness TlmAny))
+uint64Tlm endianness nam = TlmPoint nam (TlmPrim (Uint64 endianness TlmAny))
+sint64Tlm endianness nam = TlmPoint nam (TlmPrim (Sint64 endianness TlmAny))
 uint64Tlmle = uint64Tlm LittleEndian
 uint64Tlmbe = uint64Tlm BigEndian
 sint64Tlmle = sint64Tlm LittleEndian
 sint64Tlmbe = sint64Tlm BigEndian
+
+
+bitField name withinType bitTlmPoints
+  = AllOf (name ++ "Group") $ (TlmPoint (name ++ "Field") (TlmPrim withinType)) : bitTlmPoints
 
 {- Creating and using primitive data -}
 wrapPrim (Uint8  _  ) n = Uint8    $ Identity $ toEnum n
@@ -244,29 +272,49 @@ unwrapPrim (Sint64 _ n) = fromEnum $ runIdentity n
 
 --data BitData = BitData Name NumBits Endianness BasicTy
 
-{-
-type Subcom = M.Map Int DataDef
+sizeOfBasic :: BasicTy -> TlmDecoded -> Int
+sizeOfBasic ty tlmDecoded =
+  case ty of
+    TlmPrim  primTy ->
+      sizeOfPrim primTy
 
-data DataDef
-  = PackedDef        Name DataSize        [DataDef]  -- product
-  | PackedBitDef     Name DataSize        [BitData]  -- product-like
-  | OneOfDef         Name DataSize Name     Subcom    -- offer to packet
-  | AllOfDef         Name DataSize        [DataDef]  -- request from packet
-  | ArrDef           Name DataSize ArrSize DataDef   -- exponent, map from int/enum to datadef
-  | ValueDef         Name DataSize         BasicTy   -- base type
+    TlmChar _ ->
+      1
 
-data Structure = Leaf Name Offset BasicTy 
-               | StructNode  Name Offset Size Structure
-               | StructSeq   Name Offset Size [Structure]
-               | StructBits  Name Offset Size [BitData]
-               | StructMulti Name Offset Size [Structure]
--}
-sizeOfBasic (TlmPrim  primTy)   = sizeOfPrim primTy
-sizeOfBasic (TlmChar _)         = 1
-sizeOfBasic (TlmDbl  _ _)       = 8
-sizeOfBasic (TlmBits ty _ _ _)  = sizeOfPrim ty
-sizeOfBasic (TlmFlt  _ _)       = 4
-sizeOfBasic (TlmArray siz ty _) = siz * sizeOfPrim ty
+    TlmDbl  _ _ ->
+      8
+
+    TlmBits ty _ _ _ ->
+      sizeOfPrim ty
+
+    TlmFlt  _ _ ->
+      4
+
+    TlmArray (FixedSize n) ty _ ->
+      n * sizeOfPrim ty
+
+    TlmArray (VariableSize nam n) ty _ ->
+      case M.lookup nam tlmDecoded of
+        Nothing -> 
+          error $ nam ++ " was not found in telemetry packet"
+
+        Just tlm ->
+          case tlmPayload tlm of
+            TlmPrim prim ->
+              (n *) . ((sizeOfPrim ty) *) $ unwrapPrim prim
+
+    TlmBuff (FixedSize n) _ ->
+      n
+
+    TlmBuff (VariableSize nam n) _ ->
+      case M.lookup nam tlmDecoded of
+        Nothing ->
+          error $ nam ++ " was not found in telemetry packet"
+
+        Just tlm ->
+          case tlmPayload tlm of
+            TlmPrim prim ->
+              n + unwrapPrim prim
 
 sizeOfPrim (Uint8  _)   = 1
 sizeOfPrim (Uint16 _ _) = 2
@@ -277,102 +325,3 @@ sizeOfPrim (Sint16 _ _) = 2
 sizeOfPrim (Sint32 _ _) = 4
 sizeOfPrim (Sint64 _ _) = 8
 
-{-
-sizeOfStruct (StructNode  _ _ siz _) = siz
-sizeOfStruct (StructSeq   _ _ siz _) = siz
-sizeOfStruct (StructBits  _ _ siz _) = siz
-sizeOfStruct (StructMulti _ _ siz _) = siz
-sizeOfStruct (Leaf _ _ ty) = sizeOfBasic ty
-
-
-sizeOfBits (BitData _ bits _ _) = bits
-sizeOfBitDefs bits = ceiling . (/ 8) . sum . map sizeOfBits $ bits
--}
-
-{-
-decodeDef :: DataDef -> Get Structure
-decodeDef def = runStateT 0 (decodeDef' def)
-
-decodeDef' :: DataDef -> StateT Offset Get Structure
-decodeDef' def =
-  case def of
-    PackedDef    sym         defs    -> decodePacked sym defs
-    PackedBitDef sym         bitDefs -> decodeBits   sym bitDefs
-    OneOfDef     sym sym     mapping -> decodeOneOf  sym mapping
-    AllOfDef     sym         defs    -> decodeAllOf  sym defs
-    ArrDef       sym arrSize def     -> decodeArr    sym arrSize def
-    ValueDef     sym         val     -> decodeVal    sym val
-
-decodePacked sym defs = 
-  do offset <- get
-     children <- mapM decodePacked defs
-     return $ StructSeq sym offset (sum $ sizeof children) children
-
-decodeBits  sym bitDefs =
-  do offset <- get
-     return $ StructBits sym offset (sizeOfBitDefs bitDefs) bitDefs
-
-decodeOneOf sym mapping =
-  do offset <- get
-     return $ StructNode sym offset undefined -- need to deal with mapping
-
-decodeAllOf sym defs =
-  do offset <- get
-     children <- decodeAtSameOffset defs
-     return $ StructMulti sym offset (maximum $ map sizeOfStruct defs) children
-
-decodeAtSameOffset []     = return []
-decodeAtSameOffset (a:as) = 
-  do offset <- get
-    a' <- decodeDef' a
-    put offset
-    as' <- decodeAtSameOffset as
-    return (a':as')
-
-decodeArr sym arrSize def =
-  do offset <- get
-     children <- case arrSize of
-                      SizeFixed siz  -> replicateM siz decodeDef'
-                      SizeLookup sym -> undefined -- need to deal with mapping
-     return $ StructSeq sym offset (sum $ map sizeOfStruct children) children
-
-decodeVal sym def =
-  do offset <- get
-     return Leaf sym offset def
-
-{- Example Definitions -}
-ccsdsVersion       = BitData "Version"   3  BigEndian (TyPrim TyUint8)
-ccsdsSecHeaderFlag = BitData "SecHeader" 1  BigEndian (TyPrim TyUint8)
-ccsdsTypeFlag      = BitData "Type"      1  BigEndian (TyPrim TyUint8)
-ccsdsApid          = BitData "APID"      11 BigEndian (TyPrim $ TyUint16 BigEndian)
--}
-
-{-
-priHeader =
-  PackedBitDef "PriHeader" 
-  [  ccsdsVersion
-  ,  ccsdsSecHeaderFlag
-  ,  ccsdsTypeFlag
-  ,  ccsdsApid
-  ]
-
-secHeaderSeconds       = BitData "Version"   3  BigEndian (TyPrim TyUint8)
-secHeaderSubseconds    = BitData "SecHeader" 1  BigEndian (TyPrim TyUint8)
-secHeaderFlagsChecksum = BitData "Checksum"  1  BigEndian (TyPrim TyUint8)
-secHeaderFlagsPad      = BitData "pad"       15 BigEndian (TyPrim $ TyUint16 BigEndian)
-
-secHeader =
-  PackedBitDef "SecHeader" 
-  [  secHeaderSeconds
-  ,  secHeaderSubseconds
-  ,  secHeaderFlagsChecksum
-  ,  secHeaderFlagsPad
-  ]
-
-header = PackedDef "Header" [priHeader, secHeader]
-
-checksum = ValueDef "checksum" (TyPrim $ TyUint16 BigEndian)
-
-tlmData = ArrDef "HSData" (SizeFixed 542) (ValueDef "hsDataByte" (TyPrim TyUint8))
-smartTlm = PackedDef "HS" [header, tlmData, checksum]
--}

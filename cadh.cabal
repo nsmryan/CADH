@@ -25,6 +25,8 @@ executable cadh-exe
                        bimap,
                        binary,
                        containers,
+                       pipes-binary,
+                       pretty-hex,
                        mtl
 Library
   hs-source-dirs:      src

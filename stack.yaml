@@ -1,6 +1,13 @@
 flags: {}
 packages:
 - '.'
-extra-deps: [binary-bits-0.5, vinyl-0.5.1, pretty-hex-1.0, bimap-0.3.2, binary-0.8.4.1, pipes-binary-0.4.1]
+extra-deps: [ binary-bits-0.5
+            , vinyl-0.5.1
+            , pretty-hex-1.0
+            , bimap-0.3.2
+            , binary-0.8.4.1
+            , pipes-binary-0.4.1
+            , pipes-parse-3.0.8
+            ]
 resolver: lts-3.4
 compiler-check: newer-minor

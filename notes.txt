@@ -1,13 +1,5 @@
 
 
-Stages:
-  read a single byte from a file using binary
-  read a single byte from a file using binary+pipes
-  read a single primitive type
-  read a record of primitive types
-  read a series of records of primitive type
-
-
 Features:
   take config (probably json) describing datatype
     consider files for each type with a way to distinguish them
@@ -16,8 +8,17 @@ Features:
   write/read file or socket depending on config file
     ideally can choose tcp or udp
 
-  output either binary blocks (packets for examples) or csv decoding
-  input should also allow csv to allow streaming its own output
+  enums
+
+  calibrated values
+
+  profiling
+
+  criterion
+
+  unit tests/property tests
+
+  logging
 
 
 Questions:
@@ -30,9 +31,6 @@ Questions:
   need to add functions/application specific code and have a mainWith
     potentially in case there is complexity to decoding packets,
     like with SPOCUtils
-
-  udp input bring up question of receiving full block verse a stream-
-    start out with stream processing through
 
 
 Data Types:
@@ -48,10 +46,6 @@ sums:
 exponents:
   map from indices or enum to data
 
-primitives:
-  (u,s) X (8,16,32,64)
-  float, double
-  bitmaps
 
 
 { "stream" :

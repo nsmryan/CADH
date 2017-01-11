@@ -26,7 +26,12 @@ executable cadh-exe
                        binary,
                        containers,
                        pipes-binary,
+                       filepath,
                        pretty-hex,
+                       optparse-applicative,
+                       cassava,
+                       pipes-csv,
+                       vector,
                        mtl
 Library
   hs-source-dirs:      src
@@ -38,13 +43,17 @@ Library
                        vinyl >= 0.5.1,
                        pipes,
                        pipes-binary,
+                       pipes-parse,
+                       pipes-csv,
                        pipes-bytestring,
                        transformers,
                        lens-family,
                        pretty-hex,
                        containers,
                        binary,
+                       vector,
+                       cassava,
                        mtl,
                        bimap
   exposed-modules:     CADH.DataDefs
-                       CADH.Structures
+                       CADH.Channel

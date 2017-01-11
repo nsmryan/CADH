@@ -8,6 +8,7 @@ extra-deps: [ binary-bits-0.5
             , binary-0.8.4.1
             , pipes-binary-0.4.1
             , pipes-parse-3.0.8
+            , pipes-csv-1.4.3
             ]
 resolver: lts-3.4
 compiler-check: newer-minor

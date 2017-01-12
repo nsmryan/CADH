@@ -41,6 +41,16 @@ import System.IO
 import CADH.DataDefs
 
 
+--type Source = Producer TlmDecoded IO r
+--type Sink = Consumer TlmDecoded IO r
+----type Processor = Pipe TlmDecoded TlmDecoded IO r
+
+data Route
+  = SourceRoute Name
+  | PacketRoute Name
+  | AnyRoute [Route]
+  | AllRoute [Route]
+
 type FileName = String
 
 

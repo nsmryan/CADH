@@ -39,7 +39,6 @@ import CADH.DataDefs
 import CADH.Channel
 
 
-
 ccsdsPacketIdentifier :: PacketSet
 ccsdsPacketIdentifier = PacketSetSingle ccsdsPacketDef
 
@@ -55,7 +54,7 @@ ccsdsPacketContainer = Section "CCSDSPacket"
 
 ccsdsDataSection :: Container
 ccsdsDataSection =
-  TlmPoint "CCSDSDataBuffer" (TlmBuff (VariableSize "CCSDSLength" (-1)) TlmAny)
+  TlmPoint "CCSDSDataBuffer" (TlmBuff (VariableSize "CCSDSLength" (-1)) TlmAny) Nothing
 
 priHeader :: Endianness -> Container
 priHeader endianness =
@@ -71,10 +70,10 @@ firstWord endianness =
   let withinType = Uint16 endianness TlmAny
    in bitField "PriHeaderFirstWord"
                withinType
-               [ TlmPoint "APID"          (TlmBits withinType 0 11 (Uint16 endianness TlmAny))
-               , TlmPoint "SecHeaderFlag" (TlmBits withinType 11 1 (Uint8 TlmAny))
-               , TlmPoint "PacketType"    (TlmBits withinType 12 1 (Uint8 TlmAny))
-               , TlmPoint "CCSDSVersion"  (TlmBits withinType 13 3 (Uint8 TlmAny))
+               [ TlmPoint "APID"          (TlmBits withinType 0 11 (Uint16 endianness TlmAny)) Nothing
+               , TlmPoint "SecHeaderFlag" (TlmBits withinType 11 1 (Uint8 TlmAny)) Nothing
+               , TlmPoint "PacketType"    (TlmBits withinType 12 1 (Uint8 TlmAny)) Nothing
+               , TlmPoint "CCSDSVersion"  (TlmBits withinType 13 3 (Uint8 TlmAny)) Nothing
                ]
 
 seqWord :: Endianness -> Container
@@ -82,17 +81,17 @@ seqWord endianness =
   let withinType = Uint16 endianness TlmAny in 
     bitField "Seq"
              withinType
-             [ TlmPoint "SeqFlag"  (TlmBits withinType 14  2 (Uint8 TlmAny))
-             , TlmPoint "SeqCount" (TlmBits withinType  0 14 (Uint16 endianness TlmAny))
+             [ TlmPoint "SeqFlag"  (TlmBits withinType 14  2 (Uint8 TlmAny)) Nothing
+             , TlmPoint "SeqCount" (TlmBits withinType  0 14 (Uint16 endianness TlmAny)) Nothing
              ]
  
-secHeader endianness = TlmPoint "SecHeader" (TlmArray (FixedSize 10) (Uint8 Proxy) [])
+secHeader endianness = TlmPoint "SecHeader" (TlmArray (FixedSize 10) (Uint8 Proxy) []) Nothing
 ccsdsHeader endianness = Section "CCSDSHeader" [priHeader endianness, secHeader endianness]
 
 dataBuffer =
   container "SystemState" [arrTlm "Data" 108 (Uint8 Proxy)]
 
-ccsdsChecksum = TlmPoint "CCSDSChecksum" (TlmPrim (Uint16 LittleEndian TlmAny))
+ccsdsChecksum = TlmPoint "CCSDSChecksum" (TlmPrim (Uint16 LittleEndian TlmAny)) (Just SemanticChecksum)
 
 systemStatePacket = PacketDef "SystemPacket" sys
 

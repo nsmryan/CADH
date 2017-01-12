@@ -3,6 +3,8 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE ConstraintKinds #-}
+
 module CADH.DataDefs
 (
   Name,
@@ -74,6 +76,7 @@ import Data.ByteString.Builder as BB
 import Data.Foldable as F
 import Data.List as L
 import Data.Bits
+import Data.Maybe
 import Data.Word
 import Data.Proxy
 import Data.Binary
@@ -112,14 +115,44 @@ data CRCType
   | CRCType16
   deriving (Show, Eq)
 
-data Semantic a
-  = SemanticTlmPoint
-  | SemanticFixedValue a
+data Semantic
+  = SemanticRequired (PrimData)
   | SemanticChecksum ChecksumType
   | SemanticCRC CRCType
-  | SemanticExpected a
+  | SemanticExpected (PrimData)
   | SemanticLength Int
   deriving (Show, Eq)
+
+data Limit a
+  = LTLimit a
+  | GTLimit a
+  | WithinRange a a
+  | EqLimit a
+  | InSetLimit [a]
+  | AndLimit (Limit a) (Limit a)
+  | OrLimit (Limit a) (Limit a)
+  | NotLimit (Limit a) (Limit a)
+  | ImpliesLimit (Limit a) (Limit a)
+
+data Persistence
+  = PersistPacketCount Int
+  | PersistTime Double
+
+data Severity 
+  = SeverityInformational
+  | SeverityWarning
+  | SeverityError
+
+data TlmLimitDef a
+  = TlmLimitDef { tlmLimitName :: Name
+                , tlmLimit :: Limit a
+                , tlmLimitPersistence :: Persistence
+                , tlmLimitSeverity :: Severity
+                }
+
+data TlmLimitData a
+  = TlmLimitData { tlmLimitDef :: TlmLimitDef a
+                 , tlmLimitCount :: Persistence}
 
 data Endianness
   = BigEndian
@@ -188,11 +221,13 @@ deriving instance
 type BasicTy = BasicTlm TlmTy
 type BasicData = BasicTlm Identity
 
+data EmptyAllowed = EmptyAllowed | EmptyNotAllowed
+                    deriving (Show, Eq, Ord)
 
-data Container = TlmPoint Name BasicTy
+data Container = TlmPoint Name BasicTy (Maybe Semantic)
                | Section Name [Container]
                | AllOf Name [Container]
-               | OneOf Name Name (M.Map Int Container)
+               | OneOf Name Name (M.Map Int Container) EmptyAllowed
                deriving (Show, Eq)
 
 data Tlm a = Tlm 
@@ -274,7 +309,7 @@ containerCSVHeader container = V.fromList $ Pre.map BChar.pack $ containerCSVHea
 containerCSVHeader' :: Container -> [String]
 containerCSVHeader' container = 
   case container of
-    TlmPoint name ty ->
+    TlmPoint name ty _ ->
       [name]
 
     Section name children ->
@@ -283,7 +318,7 @@ containerCSVHeader' container =
     AllOf name children ->
       Pre.concatMap containerCSVHeader' children
 
-    OneOf name key map ->
+    OneOf name key map _ ->
       Pre.concatMap containerCSVHeader' $ M.elems map
 
 printBasic basic = 
@@ -315,39 +350,40 @@ printTlmPoint (Tlm name offset payload)
 type TlmDef     = Tlm BasicTy
 type TlmData    = Tlm BasicData
 
+-- FIXME this needs metadata- packet time, source name, byte offset, line/packet count
 type TlmDecoded = M.Map Name TlmData
 
 {- Convience functions -}
 container nam children = Section nam children
-arrTlm nam sz ty = TlmPoint nam (TlmArray (FixedSize sz) ty [])
+arrTlm nam sz ty = TlmPoint nam (TlmArray (FixedSize sz) ty []) Nothing
 arrTlmVariable nam szName ty = TlmPoint nam (TlmArray (VariableSize szName 0) ty [])
 
-doubleTlm   nam endianness  = TlmPoint nam (TlmDbl endianness TlmAny)
+doubleTlm   nam endianness  = TlmPoint nam (TlmDbl endianness TlmAny) Nothing
 doubleTlmle nam             = doubleTlm nam LittleEndian
 doubleTlmbe nam             = doubleTlm nam BigEndian
-floatTlm    nam  endianness = TlmPoint nam (TlmFlt endianness TlmAny)
+floatTlm    nam  endianness = TlmPoint nam (TlmFlt endianness TlmAny) Nothing
 floatTlmle  nam             = floatTlm nam LittleEndian
 floatTlmbe  nam             = floatTlm nam BigEndian
 
-uint8Tlm nam = TlmPoint nam (TlmPrim (Uint8 TlmAny))
-sint8Tlm nam = TlmPoint nam (TlmPrim (Sint8 TlmAny))
+uint8Tlm nam = TlmPoint nam (TlmPrim (Uint8 TlmAny)) Nothing
+sint8Tlm nam = TlmPoint nam (TlmPrim (Sint8 TlmAny)) Nothing
 
-uint16Tlm endianness nam = TlmPoint nam (TlmPrim (Uint16 endianness TlmAny))
-sint16Tlm endianness nam = TlmPoint nam (TlmPrim (Sint16 endianness TlmAny))
+uint16Tlm endianness nam = TlmPoint nam (TlmPrim (Uint16 endianness TlmAny)) Nothing
+sint16Tlm endianness nam = TlmPoint nam (TlmPrim (Sint16 endianness TlmAny)) Nothing
 uint16Tlmle = uint16Tlm LittleEndian
 uint16Tlmbe = uint16Tlm BigEndian
 sint16Tlmle = sint16Tlm LittleEndian
 sint16Tlmbe = sint16Tlm BigEndian
 
-uint32Tlm endianness nam = TlmPoint nam (TlmPrim (Uint32 endianness TlmAny))
-sint32Tlm endianness nam = TlmPoint nam (TlmPrim (Sint32 endianness TlmAny))
+uint32Tlm endianness nam = TlmPoint nam (TlmPrim (Uint32 endianness TlmAny)) Nothing
+sint32Tlm endianness nam = TlmPoint nam (TlmPrim (Sint32 endianness TlmAny)) Nothing
 uint32Tlmle = uint32Tlm LittleEndian
 uint32Tlmbe = uint32Tlm BigEndian
 sint32Tlmle = sint32Tlm LittleEndian
 sint32Tlmbe = sint32Tlm BigEndian
 
-uint64Tlm endianness nam = TlmPoint nam (TlmPrim (Uint64 endianness TlmAny))
-sint64Tlm endianness nam = TlmPoint nam (TlmPrim (Sint64 endianness TlmAny))
+uint64Tlm endianness nam = TlmPoint nam (TlmPrim (Uint64 endianness TlmAny)) Nothing
+sint64Tlm endianness nam = TlmPoint nam (TlmPrim (Sint64 endianness TlmAny)) Nothing
 uint64Tlmle = uint64Tlm LittleEndian
 uint64Tlmbe = uint64Tlm BigEndian
 sint64Tlmle = sint64Tlm LittleEndian
@@ -355,7 +391,7 @@ sint64Tlmbe = sint64Tlm BigEndian
 
 
 bitField name withinType bitTlmPoints
-  = AllOf (name ++ "Group") $ (TlmPoint (name ++ "Field") (TlmPrim withinType)) : bitTlmPoints
+  = AllOf (name ++ "Group") $ (TlmPoint (name ++ "Field") (TlmPrim withinType) Nothing) : bitTlmPoints
 
 {- Creating and using primitive data -}
 wrapPrim (Uint8  _  ) n = Uint8    $ Identity $ toEnum n
@@ -378,6 +414,31 @@ unwrapPrim (Sint64 _ n) = fromEnum $ runIdentity n
 
 
 --data BitData = BitData Name NumBits Endianness BasicTy
+
+
+sizeOfContainer :: Container -> Maybe Int
+sizeOfContainer container =
+  case container of
+    TlmPoint name ty sem ->
+      sizeOfBasicTy ty
+
+    Section name children ->
+      Pre.sum <$> (sequence $ Pre.map sizeOfContainer children)
+
+    AllOf name children ->
+      Pre.maximum <$> (sequence $ Pre.map sizeOfContainer children)
+
+    OneOf _ _ _ EmptyAllowed ->
+      Nothing
+
+    OneOf _ _ map EmptyNotAllowed ->
+      let maybeSizes = sequence $ Pre.map sizeOfContainer $ M.elems map
+       in case maybeSizes of
+            Nothing ->
+            Just sizes ->
+             case L.and $ L.map (== (L.head sizes)) $ sizes of
+               True -> Just $ L.head sizes
+               False -> Nothing
 
 sizeOfBasic :: BasicTy -> TlmDecoded -> Int
 sizeOfBasic ty tlmDecoded =
@@ -422,6 +483,36 @@ sizeOfBasic ty tlmDecoded =
           case tlmPayload tlm of
             TlmPrim prim ->
               n + unwrapPrim prim
+
+sizeOfBasicTy :: BasicTy -> Maybe Int
+sizeOfBasicTy ty =
+  case ty of
+    TlmPrim  primTy ->
+      Just $ sizeOfPrim primTy
+
+    TlmChar _ ->
+      Just 1
+
+    TlmDbl  _ _ ->
+      Just 8
+
+    TlmBits ty _ _ _ ->
+      sizeOfPrim ty
+
+    TlmFlt  _ _ ->
+      Just 4
+
+    TlmArray (FixedSize n) ty _ ->
+      Just $ n * sizeOfPrim ty
+
+    TlmArray (VariableSize _ _) ty _ ->
+      Nothing
+
+    TlmBuff (FixedSize n) _ ->
+      Just n
+
+    TlmBuff (VariableSize nam n) _ ->
+        Nothing
 
 sizeOfPrim (Uint8  _)   = 1
 sizeOfPrim (Uint16 _ _) = 2
@@ -520,7 +611,7 @@ recommutatePrim prim =
 recommutate :: Container -> TlmDecoded -> Put
 recommutate container tlmDecoded =
   case container of
-    TlmPoint name basicTy -> 
+    TlmPoint name basicTy _ -> 
       case M.lookup name tlmDecoded of
         Nothing ->
           error $ "Could not find " ++ name ++ " during encoding"
@@ -535,7 +626,7 @@ recommutate container tlmDecoded =
       -- FIXME if this failures, it would be better to try the next child
       recommutate (Pre.head children) tlmDecoded 
 
-    OneOf name key choice -> 
+    OneOf name key choice _ -> 
       case M.lookup key tlmDecoded of
         Nothing -> error $ key ++ " not found in packet"
 
@@ -556,7 +647,7 @@ decommutate tlmDef = fst <$> decommutate' tlmDef M.empty 0
 decommutate' :: Container -> TlmDecoded -> Int -> Get (TlmDecoded, Int)
 decommutate' tlmDef tlmDecoded offset =
   case tlmDef of
-    TlmPoint name ty ->
+    TlmPoint name ty _ ->
       do tlmData <- getBasic tlmDecoded ty
          let offset' = sizeOfBasic ty tlmDecoded
          return $ (M.insert name (Tlm name offset tlmData) tlmDecoded, offset + offset')
@@ -574,9 +665,15 @@ decommutate' tlmDef tlmDecoded offset =
              Data.Binary.Get.skip $ offset' - offset
              return (tlmDecoded', offset')
 
-    OneOf name key map ->
+    OneOf name key map emptyAllowed ->
       case M.lookup key tlmDecoded of
-        Nothing -> error $ "key not found in telemetry packet"
+        Nothing -> case emptyAllowed of
+                     EmptyAllowed ->
+                       return (tlmDecoded, offset)
+
+                     EmptyNotAllowed ->
+                       error $ "key not found in telemetry packet"
+
         Just (Tlm _ _ (TlmPrim prim)) ->
           case M.lookup (unwrapPrim prim) map of
             Nothing ->

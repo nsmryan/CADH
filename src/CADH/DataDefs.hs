@@ -4,17 +4,29 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module CADH.DataDefs
 (
+  -- Simple types
   Name,
   Endianness(..),
+  Size(..),
+  Offset,
+  -- Primitive data
   Prim(..),
   PrimTy,
   PrimData,
+  wrapPrim,
+  unwrapPrim,
+  endian,
+  -- Basic Data
   BasicTlm(..),
   BasicTy,
   BasicData,
+  sizeOfBasic,
+  -- Telemetry
   TlmTy(..),
   -- DataSet(..),
   Container(..),
@@ -24,16 +36,18 @@ module CADH.DataDefs
   TlmDecoded,
   PacketDef(..),
   containerCSVHeader,
+  sizeOfContainer,
+  printTlmPoint,
+  Semantic(..),
+  ChecksumType(..),
+  CRCType(..),
+  -- Decom/Recom packets
   decommutate,
+  decomOrError,
   recommutate,
   recommutateTlmPoint,
   recommutatePrim,
-  printTlmPoint,
-  Name,
-  Size(..),
-  Offset,
-  wrapPrim,
-  unwrapPrim,
+  -- Constructing telemetry packets
   container,
   arrTlm,
   doubleTlm,
@@ -56,14 +70,10 @@ module CADH.DataDefs
   sint64Tlm,
   uint64Tlmle,
   bitField,
-  sint64Tlmbe,
-  sizeOfBasic
+  sint64Tlmbe
 ) where
 
 import Prelude as Pre
-
-import Control.Monad.Identity
-import Control.Monad as M
 
 import qualified Data.Map as M
 import qualified Data.Bimap as Bi
@@ -83,6 +93,13 @@ import Data.Binary
 import Data.Binary.Put
 import Data.Binary.Get
 import Data.Int
+import Data.Either.Validation
+import Data.Monoid
+
+import Control.Monad.Identity
+import Control.Monad.Trans.Either
+import Control.Monad.Trans.Class
+import Control.Monad as M
 
 import Hexdump
 
@@ -99,6 +116,22 @@ type Name    = String
 type Offset  = Int
 type NumBits = Int
 
+type Decom a = EitherT TlmValidationError Get a
+
+failedDecom validationError = EitherT $ return $ Left validationError
+
+data TlmValidationError
+  = TlmValidationChecksumError Name PrimData PrimData ByteString
+  | TlmValidationValueError Name PrimData PrimData
+  -- TlmValidationConditionError PrimData -- failed to satisfy condition
+
+instance Show TlmValidationError where
+  show (TlmValidationChecksumError name primData primData' byteString) =
+    show name ++ ": was " ++ show primData ++ ", expected " ++ show primData' ++ "\nbytes (" ++ show (B.length byteString) ++ "):\n" ++ simpleHex byteString
+
+  show (TlmValidationValueError name required actual) =
+    show name ++ " was " ++ show actual ++ " but should have been " ++ show required
+
 data Size
   = FixedSize Int
   | VariableSize Name Int
@@ -107,7 +140,7 @@ data Size
 data ChecksumType
   = ChecksumOverflow
   | ChecksumUnderflow
-  | ChecksumXOR
+  -- | ChecksumXOR -- FIXME needs a Bits instance for PrimData
   deriving (Show, Eq)
 
 data CRCType
@@ -117,10 +150,11 @@ data CRCType
 
 data Semantic
   = SemanticRequired (PrimData)
-  | SemanticChecksum ChecksumType
+  | SemanticChecksum Name ChecksumType
   | SemanticCRC CRCType
   | SemanticExpected (PrimData)
   | SemanticLength Int
+  -- | SemanticCondition TlmExpr
   deriving (Show, Eq)
 
 data Limit a
@@ -133,26 +167,47 @@ data Limit a
   | OrLimit (Limit a) (Limit a)
   | NotLimit (Limit a) (Limit a)
   | ImpliesLimit (Limit a) (Limit a)
+  -- | LimitConst a
+  -- | LimitVar Name
+
+{-
+data TlmExpr
+  = TlmExprIf TlmExpr TlmExpr
+  | TlmExprIfThen TlmExpr TlmExpr TlmExpr
+  | TlmExprAnd TlmExpr TlmExpr
+  | TlmExprOr TlmExpr TlmExpr
+  | TlmExprNot TlmExpr
+  | TlmExprImplies TlmExpr TlmExpr
+  | TlmExprSum TlmExpr TlmExpr
+  | TlmExprDiff TlmExpr TlmExpr
+  | TlmExprProd TlmExpr TlmExpr
+  | TlmExprQuot TlmExpr TlmExpr
+  | TlmExprBitSet TlmExpr TlmExpr
+  | TlmExprBitMask TlmExpr TlmExpr
+  | TlmExprConstant PrimData
+  | TlmExprVar Name
+-}
 
 data Persistence
   = PersistPacketCount Int
   | PersistTime Double
 
-data Severity 
+data Severity
   = SeverityInformational
   | SeverityWarning
   | SeverityError
 
-data TlmLimitDef a
-  = TlmLimitDef { tlmLimitName :: Name
-                , tlmLimit :: Limit a
-                , tlmLimitPersistence :: Persistence
-                , tlmLimitSeverity :: Severity
-                }
+data TlmLimitDef a = TlmLimitDef
+  { tlmLimitName :: Name
+  , tlmLimit :: Limit a
+  , tlmLimitPersistence :: Persistence
+  , tlmLimitSeverity :: Severity
+  }
 
-data TlmLimitData a
-  = TlmLimitData { tlmLimitDef :: TlmLimitDef a
-                 , tlmLimitCount :: Persistence}
+data TlmLimitData a = TlmLimitData
+  { tlmLimitDef :: TlmLimitDef a
+  , tlmLimitCount :: Persistence
+  }
 
 data Endianness
   = BigEndian
@@ -164,112 +219,187 @@ data TlmTy a
   | TlmRequired a
   | TlmRequires Name a
   | TlmExpected a
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 data EnumTy = EnumTy PrimTy (Bi.Bimap Int Name)
 
-data Prim f
-  = Uint8 (f Word8)
-  | Uint16 Endianness  (f Word16)
-  | Uint32 Endianness  (f Word32)
-  | Uint64 Endianness  (f Word64)
-  | Sint8              (f Int8)
-  | Sint16  Endianness (f Int16)
-  | Sint32  Endianness (f Int32)
-  | Sint64  Endianness (f Int64)
+data TlmPhaseType = TlmPhaseType 
+data TlmPhaseData = TlmPhaseData
 
-deriving instance
-  (Show (f Word8), Show (f Word16), Show (f Word32), Show (f Word64),
-   Show (f Int8), Show (f Int16), Show (f Int32), Show (f Int64)) =>
-  Show (Prim f)
+type family TlmPhase id a
+type instance TlmPhase TlmPhaseData a = a
+type instance TlmPhase TlmPhaseType a = TlmTy a
 
-deriving instance
-  (Eq (f Word8), Eq (f Word16), Eq (f Word32), Eq (f Word64),
-   Eq (f Int8), Eq (f Int16), Eq (f Int32), Eq (f Int64)) =>
-  Eq (Prim f)
+data Prim phase
+  = Uint8             (TlmPhase phase Word8)
+  | Uint16 Endianness (TlmPhase phase Word16)
+  | Uint32 Endianness (TlmPhase phase Word32)
+  | Uint64 Endianness (TlmPhase phase Word64)
+  | Sint8             (TlmPhase phase Int8)
+  | Sint16 Endianness (TlmPhase phase Int16)
+  | Sint32 Endianness (TlmPhase phase Int32)
+  | Sint64 Endianness (TlmPhase phase Int64)
 
-deriving instance
-  (Ord (f Word8), Ord (f Word16), Ord (f Word32), Ord (f Word64),
-   Ord (f Int8), Ord (f Int16), Ord (f Int32), Ord (f Int64)) =>
-  Ord (Prim f)
+deriving instance Show (Prim TlmPhaseData)
+deriving instance Show (Prim TlmPhaseType)
 
-type PrimTy   = Prim TlmTy
-type PrimData = Prim Identity
+deriving instance Eq (Prim TlmPhaseData)
+deriving instance Eq (Prim TlmPhaseType)
 
-data BasicTlm f
-  = TlmPrim   (Prim f)
-  | TlmChar   (f Char)
-  | TlmDbl    Endianness (f Double)
-  | TlmFlt    Endianness (f Float)
-  | TlmArray  Size  (Prim Proxy) [Prim f]
-  | TlmBuff   Size (f ByteString)
-  | TlmBits   PrimTy Offset NumBits (Prim f)
+deriving instance Ord (Prim TlmPhaseType)
+deriving instance Ord (Prim TlmPhaseData)
+
+instance Num (Prim TlmPhaseData) where
+  prim1 + prim2 =
+    case (prim1, prim2) of
+      (Uint8    n, Uint8     n') -> Uint8    (n + n')
+      (Uint16 e n, Uint16 e' n') -> Uint16 e (n + n')
+      (Uint32 e n, Uint32 e' n') -> Uint32 e (n + n')
+      (Uint64 e n, Uint64 e' n') -> Uint64 e (n + n')
+      (Sint8    n, Sint8     n') -> Sint8    (n + n')
+      (Sint16 e n, Sint16 e' n') -> Sint16 e (n + n')
+      (Sint32 e n, Sint32 e' n') -> Sint32 e (n + n')
+      (Sint64 e n, Sint64 e' n') -> Sint64 e (n + n')
+      otherwise -> error $ "Cannot apply binary operator to " ++ show prim1 ++ ", and " ++ show prim2
+  prim1 - prim2 =
+    case (prim1, prim2) of
+      (Uint8    n, Uint8     n') -> Uint8    (n - n')
+      (Uint16 e n, Uint16 e' n') -> Uint16 e (n - n')
+      (Uint32 e n, Uint32 e' n') -> Uint32 e (n - n')
+      (Uint64 e n, Uint64 e' n') -> Uint64 e (n - n')
+      (Sint8    n, Sint8     n') -> Sint8    (n - n')
+      (Sint16 e n, Sint16 e' n') -> Sint16 e (n - n')
+      (Sint32 e n, Sint32 e' n') -> Sint32 e (n - n')
+      (Sint64 e n, Sint64 e' n') -> Sint64 e (n - n')
+      otherwise -> error $ "Cannot apply binary operator to " ++ show prim1 ++ ", and " ++ show prim2
+  prim1 * prim2 =
+    case (prim1, prim2) of
+      (Uint8    n, Uint8     n') -> Uint8    (n * n')
+      (Uint16 e n, Uint16 e' n') -> Uint16 e (n * n')
+      (Uint32 e n, Uint32 e' n') -> Uint32 e (n * n')
+      (Uint64 e n, Uint64 e' n') -> Uint64 e (n * n')
+      (Sint8    n, Sint8     n') -> Sint8    (n * n')
+      (Sint16 e n, Sint16 e' n') -> Sint16 e (n * n')
+      (Sint32 e n, Sint32 e' n') -> Sint32 e (n * n')
+      (Sint64 e n, Sint64 e' n') -> Sint64 e (n * n')
+      otherwise -> error $ "Cannot apply binary operator to " ++ show prim1 ++ ", and " ++ show prim2
+  abs prim =
+    case prim of
+      Uint8    n -> Uint8    $ abs n
+      Uint16 e n -> Uint16 e $ abs n
+      Uint32 e n -> Uint32 e $ abs n
+      Uint64 e n -> Uint64 e $ abs n
+      Sint8    n -> Sint8    $ abs n
+      Sint16 e n -> Sint16 e $ abs n
+      Sint32 e n -> Sint32 e $ abs n
+      Sint64 e n -> Sint64 e $ abs n
+  negate prim =
+    case prim of
+      Uint8    n -> Uint8    $ negate n
+      Uint16 e n -> Uint16 e $ negate n
+      Uint32 e n -> Uint32 e $ negate n
+      Uint64 e n -> Uint64 e $ negate n
+      Sint8    n -> Sint8    $ negate n
+      Sint16 e n -> Sint16 e $ negate n
+      Sint32 e n -> Sint32 e $ negate n
+      Sint64 e n -> Sint64 e $ negate n
+  signum prim =
+    case prim of
+      Uint8    n -> Uint8    $ 1
+      Uint16 e n -> Uint16 e $ 1
+      Uint32 e n -> Uint32 e $ 1
+      Uint64 e n -> Uint64 e $ 1
+      Sint8    n -> Sint8    $ signum n
+      Sint16 e n -> Sint16 e $ signum n
+      Sint32 e n -> Sint32 e $ signum n
+      Sint64 e n -> Sint64 e $ signum n
+  fromInteger n = Sint64 LittleEndian $ fromIntegral n
+  
+
+type PrimTy    = Prim TlmPhaseType
+type PrimData  = Prim TlmPhaseData
+
+data BasicTlm tlmPhase
+  = TlmPrim   (Prim tlmPhase)
+  | TlmChar   (TlmPhase tlmPhase Char)
+  | TlmDbl    Endianness (TlmPhase tlmPhase Double)
+  | TlmFlt    Endianness (TlmPhase tlmPhase Float)
+  | TlmArray  Size  (Prim TlmPhaseType) [Prim tlmPhase]
+  | TlmBuff   Size (TlmPhase tlmPhase ByteString)
+  | TlmBits   PrimTy Offset NumBits (Prim tlmPhase)
   -- | TyEnum   EnumTy PrimTy
 
-deriving instance
-  (Show (f Word8), Show (f Word16), Show (f Word32), Show (f Word64),
-   Show (f Int8), Show (f Int16), Show (f Int32), Show (f Int64),
-   Show (f Char), Show (f Double), Show (f Float), Show (f ByteString)) =>
-  Show (BasicTlm f)
+type BasicTy    = BasicTlm TlmPhaseType
+type BasicData  = BasicTlm TlmPhaseData
 
-deriving instance
-  (Eq (f Word8), Eq (f Word16), Eq (f Word32), Eq (f Word64),
-   Eq (f Int8), Eq (f Int16), Eq (f Int32), Eq (f Int64),
-   Eq (f Char), Eq (f Double), Eq (f Float), Eq (f ByteString)) =>
-  Eq (BasicTlm f)
+deriving instance Show BasicTy
+deriving instance Show BasicData
 
-type BasicTy = BasicTlm TlmTy
-type BasicData = BasicTlm Identity
+deriving instance Eq BasicTy
+deriving instance Eq BasicData
+
+--deriving instance
+--  (Show (f Word8), Show (f Word16), Show (f Word32), Show (f Word64),
+--   Show (f Int8), Show (f Int16), Show (f Int32), Show (f Int64),
+--   Show (f Char), Show (f Double), Show (f Float), Show (f ByteString)) =>
+--  Show (BasicTlm f)
+--
+--deriving instance
+--  (Eq (f Word8), Eq (f Word16), Eq (f Word32), Eq (f Word64),
+--   Eq (f Int8), Eq (f Int16), Eq (f Int32), Eq (f Int64),
+--   Eq (f Char), Eq (f Double), Eq (f Float), Eq (f ByteString)) =>
+--  Eq (BasicTlm f)
 
 data EmptyAllowed = EmptyAllowed | EmptyNotAllowed
-                    deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Enum)
 
-data Container = TlmPoint Name BasicTy (Maybe Semantic)
-               | Section Name [Container]
-               | AllOf Name [Container]
-               | OneOf Name Name (M.Map Int Container) EmptyAllowed
-               deriving (Show, Eq)
+data Container
+  = TlmPoint Name BasicTy (Maybe Semantic)
+  | Section Name [Container]
+  | AllOf Name [Container]
+  | OneOf Name Name (M.Map Int Container) EmptyAllowed
+  deriving (Show, Eq)
 
-data Tlm a = Tlm 
+data Tlm a = Tlm
   { tlmName    :: Name
-  , tlmOffset  :: Offset 
+  , tlmOffset  :: Offset
   , tlmPayload :: a
   } deriving (Show, Eq)
 
-data PacketDef
-  = PacketDef { packetName :: Name
-              , packetDef :: Container
-              }
+data PacketDef = PacketDef
+  { packetName :: Name
+  , packetDef :: Container
+  }
 
 instance (Csv.ToField a) => Csv.ToField (Tlm a) where
   toField tlm = Csv.toField $ tlmPayload tlm
 
 -- instance Csv.ToNamedRecord TlmData where
 --   toNamedRecord tlmData = Csv.toNamedRecord $ tlmPayload tlmData
--- 
+--
 -- instance Csv.ToNamedRecord BasicData where
 --   toNamedRecord tlmData = undefined -- Csv.toNamedRecord $ tlmPayload tlmData
 
 instance Csv.ToField BasicData where
   toField basicData =
-    BL.toStrict $ toLazyByteString $ 
+    BL.toStrict $ toLazyByteString $
       case basicData of
         TlmPrim   prim ->
           byteString $ Csv.toField prim
 
-        TlmChar (Identity chr) ->
+        TlmChar chr ->
           char8 chr
 
-        TlmDbl    e (Identity dbl) ->
+        TlmDbl e dbl ->
           doubleDec dbl
 
-        TlmFlt    e (Identity flt) ->
+        TlmFlt e flt ->
           floatDec flt
 
         TlmArray size prim prims ->
-          byteString $ F.fold $ L.intersperse (BChar.singleton ' ') $ Pre.map Csv.toField prims 
+          byteString $ F.fold $ L.intersperse (BChar.singleton ' ') $ Pre.map Csv.toField prims
 
-        TlmBuff size (Identity bytes) ->
+        TlmBuff size bytes ->
           byteStringHex bytes
 
         TlmBits primty offset numBits prim ->
@@ -277,37 +407,63 @@ instance Csv.ToField BasicData where
 
 instance Csv.ToField PrimData where
   toField primData =
-    BL.toStrict $ toLazyByteString $ 
+    BL.toStrict $ toLazyByteString $
       case primData of
-        Uint8    (Identity n) ->
+        Uint8 n ->
           word8Dec n
 
-        Uint16 e (Identity n) ->
+        Uint16 e n ->
           word16Dec n
 
-        Uint32 e (Identity n) ->
+        Uint32 e n ->
           word32Dec n
 
-        Uint64 e (Identity n) ->
+        Uint64 e n ->
           word64Dec n
 
-        Sint8    (Identity n) ->
+        Sint8 n ->
           int8Dec n
 
-        Sint16 e (Identity n) ->
+        Sint16 e n ->
           int16Dec n
 
-        Sint32 e (Identity n) ->
+        Sint32 e n ->
           int32Dec n
 
-        Sint64 e (Identity n) ->
+        Sint64 e n ->
           int64Dec n
+
+primOp1 uint8Op uint16Op uint32Op uint64Op int8Op int16Op int32Op int64Op primData =
+  case primData of
+    Uint8 n ->
+      uint8Op n
+
+    Uint16 e n ->
+      uint16Op n
+
+    Uint32 e n ->
+      uint32Op n
+
+    Uint64 e n ->
+      uint64Op n
+
+    Sint8 n ->
+      int8Op n
+
+    Sint16 e n ->
+      int16Op n
+
+    Sint32 e n ->
+      int32Op n
+
+    Sint64 e n ->
+      int64Op n
 
 containerCSVHeader :: Container -> Csv.Header
 containerCSVHeader container = V.fromList $ Pre.map BChar.pack $ containerCSVHeader' container
 
 containerCSVHeader' :: Container -> [String]
-containerCSVHeader' container = 
+containerCSVHeader' container =
   case container of
     TlmPoint name ty _ ->
       [name]
@@ -321,7 +477,7 @@ containerCSVHeader' container =
     OneOf name key map _ ->
       Pre.concatMap containerCSVHeader' $ M.elems map
 
-printBasic basic = 
+printBasic basic =
   case basic of
     TlmPrim prim ->
       show prim
@@ -344,7 +500,7 @@ printBasic basic =
     TlmBits primContainer offset n prim ->
       show prim
 
-printTlmPoint (Tlm name offset payload) 
+printTlmPoint (Tlm name offset payload)
   = name ++ ": " ++ printBasic payload ++ " at offset " ++ show offset
 
 type TlmDef     = Tlm BasicTy
@@ -394,23 +550,23 @@ bitField name withinType bitTlmPoints
   = AllOf (name ++ "Group") $ (TlmPoint (name ++ "Field") (TlmPrim withinType) Nothing) : bitTlmPoints
 
 {- Creating and using primitive data -}
-wrapPrim (Uint8  _  ) n = Uint8    $ Identity $ toEnum n
-wrapPrim (Uint16 e _) n = Uint16 e $ Identity $ toEnum n
-wrapPrim (Uint32 e _) n = Uint32 e $ Identity $ toEnum n
-wrapPrim (Uint64 e _) n = Uint64 e $ Identity $ toEnum n
-wrapPrim (Sint8  _  ) n = Sint8    $ Identity $ toEnum n
-wrapPrim (Sint16 e _) n = Sint16 e $ Identity $ toEnum n
-wrapPrim (Sint32 e _) n = Sint32 e $ Identity $ toEnum n
-wrapPrim (Sint64 e _) n = Sint64 e $ Identity $ toEnum n
+wrapPrim (Uint8  _  ) n = Uint8    $ toEnum n
+wrapPrim (Uint16 e _) n = Uint16 e $ toEnum n
+wrapPrim (Uint32 e _) n = Uint32 e $ toEnum n
+wrapPrim (Uint64 e _) n = Uint64 e $ toEnum n
+wrapPrim (Sint8  _  ) n = Sint8    $ toEnum n
+wrapPrim (Sint16 e _) n = Sint16 e $ toEnum n
+wrapPrim (Sint32 e _) n = Sint32 e $ toEnum n
+wrapPrim (Sint64 e _) n = Sint64 e $ toEnum n
 
-unwrapPrim (Uint8    n) = fromEnum $ runIdentity n
-unwrapPrim (Uint16 _ n) = fromEnum $ runIdentity n
-unwrapPrim (Uint32 _ n) = fromEnum $ runIdentity n
-unwrapPrim (Uint64 _ n) = fromEnum $ runIdentity n
-unwrapPrim (Sint8    n) = fromEnum $ runIdentity n
-unwrapPrim (Sint16 _ n) = fromEnum $ runIdentity n
-unwrapPrim (Sint32 _ n) = fromEnum $ runIdentity n
-unwrapPrim (Sint64 _ n) = fromEnum $ runIdentity n
+unwrapPrim (Uint8    n) = fromEnum n
+unwrapPrim (Uint16 _ n) = fromEnum n
+unwrapPrim (Uint32 _ n) = fromEnum n
+unwrapPrim (Uint64 _ n) = fromEnum n
+unwrapPrim (Sint8    n) = fromEnum n
+unwrapPrim (Sint16 _ n) = fromEnum n
+unwrapPrim (Sint32 _ n) = fromEnum n
+unwrapPrim (Sint64 _ n) = fromEnum n
 
 
 --data BitData = BitData Name NumBits Endianness BasicTy
@@ -435,6 +591,7 @@ sizeOfContainer container =
       let maybeSizes = sequence $ Pre.map sizeOfContainer $ M.elems map
        in case maybeSizes of
             Nothing ->
+              Nothing
             Just sizes ->
              case L.and $ L.map (== (L.head sizes)) $ sizes of
                True -> Just $ L.head sizes
@@ -463,7 +620,7 @@ sizeOfBasic ty tlmDecoded =
 
     TlmArray (VariableSize nam n) ty _ ->
       case M.lookup nam tlmDecoded of
-        Nothing -> 
+        Nothing ->
           error $ nam ++ " was not found in telemetry packet"
 
         Just tlm ->
@@ -497,7 +654,7 @@ sizeOfBasicTy ty =
       Just 8
 
     TlmBits ty _ _ _ ->
-      sizeOfPrim ty
+      Just $ sizeOfPrim ty
 
     TlmFlt  _ _ ->
       Just 4
@@ -523,34 +680,34 @@ sizeOfPrim (Sint16 _ _) = 2
 sizeOfPrim (Sint32 _ _) = 4
 sizeOfPrim (Sint64 _ _) = 8
 
+endian endianess little big =
+  case endianess of
+    LittleEndian ->
+      little
+
+    BigEndian ->
+      big
+
 recommutateTlmPoint :: BasicData -> Put
-recommutateTlmPoint tlmData = 
+recommutateTlmPoint tlmData =
   case tlmData of
     TlmPrim prim ->
       recommutatePrim prim
 
-    TlmChar (Identity chr) ->
+    TlmChar chr ->
       putCharUtf8 chr
 
-    TlmDbl e (Identity dbl) ->
-      case e of
-        BigEndian -> 
-          putDoublebe dbl
-        LittleEndian -> 
-          putDoublele dbl
+    TlmDbl e dbl ->
+      endian e putDoublele putDoublebe dbl
 
-    TlmFlt e (Identity flt) ->
-      case e of
-        BigEndian -> 
-          putFloatbe flt
-        LittleEndian -> 
-          putFloatle flt
+    TlmFlt e flt ->
+      endian e putFloatle putFloatbe flt
 
     TlmArray siz prim prims ->
-      undefined
+      error $ "recommutating arrays is not yet implemented"
 
     TlmBuff siz bytes ->
-      putByteString $ runIdentity bytes
+      putByteString bytes
 
     TlmBits primTy offset numBits prim ->
       -- NOTE bits are not layed down as they must be preceded by a field containing
@@ -558,60 +715,36 @@ recommutateTlmPoint tlmData =
       -- the recomming of AnyOf
       return ()
 
-recommutatePrim prim = 
+recommutatePrim prim =
   case prim of
-    Uint8 (Identity n) ->
+    Uint8 n ->
       putWord8 n
 
-    Uint16 e (Identity n) ->
-      case e of
-        BigEndian ->
-          putWord16be n
-        LittleEndian ->
-          putWord16le n
+    Uint16 e  n ->
+      endian e putWord16le putWord16le n
 
-    Uint32 e (Identity n) ->
-      case e of
-        BigEndian ->
-          putWord32be n
-        LittleEndian ->
-          putWord32le n
+    Uint32 e  n ->
+      endian e putWord32le putWord32be n
 
-    Uint64 e (Identity n) ->
-      case e of
-        BigEndian ->
-          putWord64be n
-        LittleEndian ->
-          putWord64le n
+    Uint64 e  n ->
+      endian e putWord64le putWord64be n
 
-    Sint8 (Identity n) ->
+    Sint8  n ->
       putInt8 n
 
-    Sint16 e (Identity n) ->
-      case e of
-        BigEndian ->
-          putInt16be n
-        LittleEndian ->
-          putInt16le n
+    Sint16 e  n ->
+      endian e putInt16le putInt16be n
 
-    Sint32 e (Identity n) ->
-      case e of
-        BigEndian ->
-          putInt32be n
-        LittleEndian ->
-          putInt32le n
+    Sint32 e  n ->
+      endian e putInt32le putInt32be n
 
-    Sint64 e (Identity n) ->
-      case e of
-        BigEndian ->
-          putInt64be n
-        LittleEndian ->
-          putInt64le n
+    Sint64 e  n ->
+      endian e putInt64le putInt64be n
 
 recommutate :: Container -> TlmDecoded -> Put
 recommutate container tlmDecoded =
   case container of
-    TlmPoint name basicTy _ -> 
+    TlmPoint name basicTy _ ->
       case M.lookup name tlmDecoded of
         Nothing ->
           error $ "Could not find " ++ name ++ " during encoding"
@@ -619,14 +752,14 @@ recommutate container tlmDecoded =
         Just tlmData ->
           recommutateTlmPoint $ tlmPayload tlmData
 
-    Section name children -> 
-      F.fold $ Pre.map (flip recommutate tlmDecoded) children 
+    Section name children ->
+      F.fold $ Pre.map (flip recommutate tlmDecoded) children
 
-    AllOf name children -> 
-      -- FIXME if this failures, it would be better to try the next child
-      recommutate (Pre.head children) tlmDecoded 
+    AllOf name children ->
+      -- FIXME if this fails, it would be better to try the next child
+      recommutate (Pre.head children) tlmDecoded
 
-    OneOf name key choice _ -> 
+    OneOf name key choice _ ->
       case M.lookup key tlmDecoded of
         Nothing -> error $ key ++ " not found in packet"
 
@@ -641,126 +774,178 @@ recommutate container tlmDecoded =
                   recommutate tlmData tlmDecoded
 
 
-decommutate :: Container -> Get TlmDecoded
-decommutate tlmDef = fst <$> decommutate' tlmDef M.empty 0
+calculateChecksum prim checkType bytes =
+  let n = (fromIntegral $ B.length bytes) `div` (sizeOfPrim prim)
+      vals = runGet (Pre.sequence . Pre.replicate n . getPrim $ prim) $ BL.fromStrict bytes
+  in case checkType of
+       ChecksumUnderflow -> Pre.foldl1 (-) vals
+       ChecksumOverflow -> Pre.foldl1 (+) vals
 
-decommutate' :: Container -> TlmDecoded -> Int -> Get (TlmDecoded, Int)
-decommutate' tlmDef tlmDecoded offset =
+findTlm name map =
+  case M.lookup name map of
+    Nothing ->
+      error $ "Did not find " ++ name ++ " in decoded telemetry.\n" ++ show map
+    Just val ->
+      val
+
+-- Note- defaults to BigEndian for 8 bit values
+getEndianness :: Prim f -> Endianness
+getEndianness prim
+  = case prim of
+      Uint8 _ -> BigEndian
+      Uint16 e _ -> e
+      Uint32 e _ -> e
+      Uint64 e _ -> e
+      Sint8  _ -> BigEndian
+      Sint16  e _ -> e
+      Sint32  e _ -> e
+      Sint64  e _ -> e
+
+unPrim :: BasicData -> PrimData
+unPrim (TlmPrim prim) = prim
+unPrim basicTlm = error $ "Required a primitive type, got '" ++ show basicTlm ++ "'"
+
+getBuffer :: BasicData -> ByteString
+getBuffer (TlmBuff siz bytes) = bytes
+getBuffer basicTlm = error $ "Required a buffer type, got '" ++ show basicTlm ++ "'"
+
+handleSemantic :: Name -> BasicData -> TlmDecoded -> Semantic -> Maybe TlmValidationError
+handleSemantic checkName tlmData tlmDecoded semantic =
+  case semantic of
+    SemanticChecksum bufferName checkType ->
+      let bytes = getBuffer $ tlmPayload (findTlm bufferName tlmDecoded)
+          actual = calculateChecksum expected checkType bytes
+          expected = unPrim tlmData
+      in case actual == expected of
+           True -> Nothing
+           False -> Just $ TlmValidationChecksumError checkName actual expected bytes
+
+    SemanticRequired requiredValue ->
+      let actual = unPrim tlmData
+      in case actual == requiredValue of
+           True ->
+             Nothing
+
+           False ->
+             Just $ TlmValidationValueError checkName requiredValue actual
+
+    otherwise ->
+       Nothing
+
+decomOrError :: Container -> Get TlmDecoded
+decomOrError tlmDef =
+  eitherT (error . show) (return) $ decommutate tlmDef
+
+decommutate :: Container -> Decom TlmDecoded
+decommutate tlmDef =
+   fst <$> decommutate' tlmDef (M.empty, 0)
+
+decommutate' :: Container -> (TlmDecoded, Int) -> Decom (TlmDecoded, Int)
+decommutate' tlmDef (tlmDecoded, offset) =
   case tlmDef of
-    TlmPoint name ty _ ->
-      do tlmData <- getBasic tlmDecoded ty
-         let offset' = sizeOfBasic ty tlmDecoded
-         return $ (M.insert name (Tlm name offset tlmData) tlmDecoded, offset + offset')
+    TlmPoint name ty maybeSemantic -> do
+      tlmData <- lift $ getBasic tlmDecoded ty
+      let size = sizeOfBasic ty tlmDecoded
+      let success = (M.insert name (Tlm name offset tlmData) tlmDecoded, offset + size)
+      case maybeSemantic of
+        Nothing -> 
+          return success
+
+        Just semantic ->
+          case handleSemantic name tlmData tlmDecoded semantic of
+           Nothing ->
+            return success
+
+           Just e -> failedDecom e
 
     Section name children ->
-      let decom (tlmDecoded', offset') tlmDef' = decommutate' tlmDef' tlmDecoded' offset'
-      in M.foldM decom (tlmDecoded, offset) children
+      M.foldM (flip decommutate') (tlmDecoded, offset) children
 
     AllOf name children ->
-      let decom (tlmDecoded', offsets) tlmDef' = 
-            do (tlmDecoded'', offset') <- lookAhead $ decommutate' tlmDef' tlmDecoded' offset
-               return (tlmDecoded'', offset' : offsets)
-       in do (tlmDecoded', offsets) <- M.foldM decom (tlmDecoded, []) children
-             let offset' = Pre.maximum offsets
-             Data.Binary.Get.skip $ offset' - offset
-             return (tlmDecoded', offset')
+      let decom (tlmDecoded', offsets) tlmDef' =
+            do
+              (tlmDecoded'', offset') <- EitherT $ lookAhead $ runEitherT $ decommutate' tlmDef' (tlmDecoded', offset)
+              return $ (tlmDecoded'', offset' : offsets)
+       in do
+           (tlmDecoded', offsets) <- M.foldM decom (tlmDecoded, []) children
+           let maxOffset = Pre.maximum offsets
+           lift $ Data.Binary.Get.skip $ maxOffset - offset
+           return (tlmDecoded', maxOffset)
 
     OneOf name key map emptyAllowed ->
       case M.lookup key tlmDecoded of
-        Nothing -> case emptyAllowed of
-                     EmptyAllowed ->
-                       return (tlmDecoded, offset)
+        Nothing ->
+          case emptyAllowed of
+            EmptyAllowed ->
+              return (tlmDecoded, offset)
 
-                     EmptyNotAllowed ->
-                       error $ "key not found in telemetry packet"
+            EmptyNotAllowed ->
+              error $ "key not found in telemetry packet"
 
         Just (Tlm _ _ (TlmPrim prim)) ->
           case M.lookup (unwrapPrim prim) map of
             Nothing ->
               error $ "Value of " ++ key ++ ", " ++ Pre.show prim ++ ", not found"
+
             Just tlmDef' ->
-              decommutate' tlmDef' tlmDecoded offset
+              decommutate' tlmDef' (tlmDecoded, offset)
 
 getPrim :: Prim f -> Get PrimData
-getPrim ty = 
+getPrim ty =
   case ty of
     Uint8 _ ->
-      (Uint8 . Identity) <$> getWord8
+      (Uint8) <$> getWord8
 
     Uint16 e _ ->
-      (Uint16 e . Identity) <$>
-        (case e of
-           BigEndian    -> getWord16be
-           LittleEndian -> getWord16le)
+      (Uint16 e) <$> endian e getWord16le getWord16be
 
     Uint32 e _ ->
-      (Uint32 e . Identity) <$>
-         (case e of
-            BigEndian    -> getWord32be
-            LittleEndian -> getWord32le)
+      (Uint32 e) <$> endian e getWord32le getWord32be
 
     Uint64 e _ ->
-      (Uint64 e . Identity)  <$>
-         (case e of
-            BigEndian    -> getWord64be
-            LittleEndian -> getWord64le)
+      (Uint64 e)  <$> endian e getWord64le getWord64be
 
     Sint8 _ ->
-      (Sint8 . Identity) <$> getInt8
+      (Sint8) <$> getInt8
 
     Sint16 e _ ->
-      (Sint16 e . Identity) <$>
-         (case e of
-            BigEndian    -> getInt16be
-            LittleEndian -> getInt16le)
+      (Sint16 e) <$> endian e getInt16le getInt16be
 
     Sint32  e _ ->
-      (Sint32 e . Identity) <$>
-         (case e of
-            BigEndian    -> getInt32be
-            LittleEndian -> getInt32le)
+      (Sint32 e) <$> endian e getInt32le getInt32be
 
     Sint64 e _ ->
-      (Sint64 e . Identity) <$>
-         (case e of
-            BigEndian    -> getInt64be
-            LittleEndian -> getInt64le)
+      (Sint64 e) <$> endian e getInt64le getInt64be
 
 getBasic :: TlmDecoded -> BasicTy -> Get BasicData
-getBasic tlmDecoded ty = 
+getBasic tlmDecoded ty =
   case ty of
     TlmChar _ ->
-      (TlmChar . Identity . toEnum . fromEnum) <$> getWord8
+      (TlmChar . toEnum . fromEnum) <$> getWord8
 
     TlmBits tyWithin offset numBits ty ->
       (TlmPrim . extractBits offset numBits ty) <$>
                     (getPrim tyWithin)
 
     TlmDbl e _ ->
-      (TlmDbl e . Identity) <$>
-         (case e of
-            BigEndian    -> getDoublebe
-            LittleEndian -> getDoublele)
+      (TlmDbl e) <$> endian e getDoublele getDoublebe
 
     TlmFlt e _ ->
-      (TlmFlt e . Identity) <$>
-         (case e of
-            BigEndian    -> getFloatbe
-            LittleEndian -> getFloatle)
+      (TlmFlt e) <$> endian e getFloatle getFloatbe
 
     TlmArray (FixedSize siz) ty _ ->
       (TlmArray (FixedSize siz) ty) <$>
          (Pre.sequence . Pre.replicate siz $ (getPrim ty))
 
     TlmBuff (FixedSize siz) _ ->
-      (TlmBuff (FixedSize siz) . Identity) <$> getByteString siz
+      (TlmBuff (FixedSize siz)) <$> getByteString siz
 
     TlmBuff (VariableSize name siz) val ->
       case tlmPayload <$> M.lookup name tlmDecoded of
         Nothing ->
           error $ name ++ " was not found as a length field. Map = " ++ Pre.show tlmDecoded
 
-        Just (TlmPrim prim) -> 
+        Just (TlmPrim prim) ->
           getBasic tlmDecoded (TlmBuff (FixedSize (unwrapPrim prim + siz)) val)
 
     TlmPrim prim ->
@@ -773,3 +958,4 @@ extractBits offset numBits ty prim =
   wrapPrim ty . mask numBits . (flip shiftR offset) . unwrapPrim $ prim
 
 mask numBits bits = ((setBit zeroBits numBits) - 1) .&. bits
+

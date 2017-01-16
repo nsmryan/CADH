@@ -31,6 +31,8 @@ executable cadh-exe
                        optparse-applicative,
                        cassava,
                        pipes-csv,
+                       either,
+                       transformers,
                        vector,
                        mtl
 Library
@@ -54,6 +56,7 @@ Library
                        vector,
                        cassava,
                        mtl,
+                       either,
                        bimap
   exposed-modules:     CADH.DataDefs
                        CADH.Channel

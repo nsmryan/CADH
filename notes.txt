@@ -2,7 +2,7 @@
 
 Features:
   take config (probably json) describing datatype
-    consider files for each type with a way to distinguish them
+    consider files for each type with a way to distinguish themFF
     ideally these get placed in a sum type
 
   write/read file or socket depending on config file
@@ -18,7 +18,13 @@ Features:
 
   unit tests/property tests
 
-  logging
+  logging-
+    expected values not met
+    limits exceeded
+    checksum/crc errors
+    bad packet Hex lines
+
+  Map to HashMap? Maybe look at when criterion is set up
 
 
 Questions:
